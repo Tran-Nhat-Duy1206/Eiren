@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Events, SlashCommandBuilder } from 'discord.js';
+import { Events, MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { PermissionService } from './permissions/permission-service.js';
 import { ModuleService } from '../services/module-service.js';
 import { GuildConfigService } from '../services/guild-config-service.js';
@@ -64,6 +64,12 @@ describe('guild configuration and modules', () => {
     expect(await modules.isEnabled(owner.guildId, 'fixture')).toBe(false);
     expect(repository.setModuleState).toHaveBeenCalledTimes(2);
   });
+  it('does not activate optional modules when required gateway capability is unavailable', async () => {
+    const { repository } = fixture();
+    const modules = new ModuleService(repository, [{ key: 'core', defaultEnabled: true }, { key: 'logging', defaultEnabled: false }], new Set(['logging']));
+    await expect(modules.setEnabled(owner.guildId, 'logging', true, owner.userId)).rejects.toMatchObject({ code: 'VALIDATION' });
+    expect(await modules.isEnabled(owner.guildId, 'logging')).toBe(false);
+  });
   it('does not expose internal test modules to guild management', async () => {
     const { repository } = fixture();
     const modules = new ModuleService(repository, [{ key: 'core', defaultEnabled: true }, { key: 'test', defaultEnabled: false, internal: true }]);
@@ -107,12 +113,14 @@ describe('framework gating', () => {
       data: new SlashCommandBuilder().setName('fixture').setDescription('Test-only fixture'), execute };
     const fetch = vi.fn(async () => ({ roles: { cache: new Map([[staff.roleIds[0], true]]) } }));
     const editReply = vi.fn(async () => {});
+    const deferReply = vi.fn(async () => {});
     const interaction = {
       commandName: 'fixture', user: { id: staff.userId }, guildId: owner.guildId,
       guild: { ownerId: owner.guildOwnerId, members: { fetch } },
-      inGuild: () => true, deferred: true, deferReply: vi.fn(async () => {}), editReply,
+      inGuild: () => true, deferred: true, deferReply, editReply,
     };
     await dispatchCommand(interaction as never, new Map([['fixture', command]]), services);
+    expect(deferReply).toHaveBeenCalledWith({ flags: MessageFlags.Ephemeral });
     expect(execute).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
     expect(editReply).toHaveBeenCalledWith({ content: 'This module is disabled in this server.' });

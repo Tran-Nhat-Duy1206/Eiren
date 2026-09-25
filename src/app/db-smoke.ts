@@ -2,7 +2,7 @@ import { randomInt } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { loadEnv } from '../core/config/env.js';
 import { createDatabase } from '../core/database/connection.js';
-import { guilds, guildSettings, guildModules, guildPermissionRoles } from '../core/database/schema.js';
+import { guilds, guildSettings, guildModules, guildPermissionRoles, moderationCases, moderatorNotes } from '../core/database/schema.js';
 import { createLogger } from '../core/logger/logger.js';
 
 // An opt-in integration check against the configured real PostgreSQL instance.
@@ -23,7 +23,19 @@ try {
       const [settings] = await tx.select().from(guildSettings).where(eq(guildSettings.guildId, guildId));
       const [module] = await tx.select().from(guildModules).where(eq(guildModules.guildId, guildId));
       const [role] = await tx.select().from(guildPermissionRoles).where(eq(guildPermissionRoles.guildId, guildId));
-      if (!settings || module?.enabled !== false || role?.level !== 'ADMIN') throw new Error('Smoke-test records were not readable');
+      const [caseRecord] = await tx.insert(moderationCases).values({ guildId, targetId: guildId, moderatorId: guildId,
+        action: 'WARN', reason: 'V1 smoke test', status: 'COMPLETED' }).returning();
+      const [note] = await tx.insert(moderatorNotes).values({ guildId, targetId: guildId, moderatorId: guildId,
+        content: 'V1 private note smoke test' }).returning();
+      if (!settings || module?.enabled !== false || role?.level !== 'ADMIN' || !caseRecord || !note)
+        throw new Error('Smoke-test records were not readable');
+      // The DB rejects invalid status even when a caller bypasses the service. The transaction
+      // is deliberately rolled back immediately afterward (PostgreSQL marks it aborted).
+      let invalidRejected = false;
+      try { await tx.insert(moderationCases).values({ guildId, targetId: guildId, moderatorId: guildId,
+        action: 'WARN', reason: 'invalid', status: 'INVALID' }); }
+      catch { invalidRejected = true; }
+      if (!invalidRejected) throw new Error('Moderation case status constraint failed');
       throw rollback;
     });
     throw new Error('Smoke-test transaction did not roll back');
@@ -32,7 +44,7 @@ try {
   }
   const [persisted] = await db.select().from(guilds).where(eq(guilds.id, guildId));
   if (persisted) throw new Error('Smoke-test transaction persisted unexpectedly');
-  logger.info('PostgreSQL V0 schema and rollback smoke test passed');
+  logger.info('PostgreSQL V0/V1 schema, constraints and rollback smoke test passed');
 } catch (error) {
   // Database driver exceptions can contain credentials; only emit the error class.
   logger.error({ errorType: error instanceof Error ? error.name : 'unknown' }, 'PostgreSQL smoke test failed');

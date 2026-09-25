@@ -9,6 +9,7 @@ const schema = z.object({
   DISCORD_DEV_GUILD_ID: snowflake.optional(),
   DATABASE_URL: z.string().url().refine(value => ['postgres:', 'postgresql:'].includes(new URL(value).protocol), 'Expected a PostgreSQL URL'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error', 'fatal']).default('info'),
+  ENABLE_GUILD_MEMBERS_INTENT: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
 });
 
 export type Env = z.infer<typeof schema>;
