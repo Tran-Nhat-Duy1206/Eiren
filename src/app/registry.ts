@@ -3,6 +3,8 @@ import type { BotEvent } from '../core/events/event.js';
 import type { ModuleDefinition } from '../services/module-service.js';
 import { coreCommands } from '../modules/core/commands.js';
 import { coreEvents } from '../modules/core/events.js';
+import { loggingEvents } from '../modules/logging/events.js';
+import { moderationCommands } from '../modules/moderation/commands.js';
 
 export interface ModuleManifest {
   definition: ModuleDefinition;
@@ -11,9 +13,11 @@ export interface ModuleManifest {
 }
 
 // New production modules contribute a manifest here; neither dispatcher needs editing.
-export const manifests: readonly ModuleManifest[] = [{
-  definition: { key: 'core', defaultEnabled: true }, commands: coreCommands, events: coreEvents,
-}];
+export const manifests: readonly ModuleManifest[] = [
+  { definition: { key: 'core', defaultEnabled: true }, commands: coreCommands, events: coreEvents },
+  { definition: { key: 'moderation', defaultEnabled: false }, commands: moderationCommands, events: [] },
+  { definition: { key: 'logging', defaultEnabled: false }, commands: [], events: loggingEvents },
+];
 
 export function buildRegistry(modules: readonly ModuleManifest[]) {
   const commands = new Map<string, Command>();

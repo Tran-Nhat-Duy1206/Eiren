@@ -64,6 +64,12 @@ describe('guild configuration and modules', () => {
     expect(await modules.isEnabled(owner.guildId, 'fixture')).toBe(false);
     expect(repository.setModuleState).toHaveBeenCalledTimes(2);
   });
+  it('does not activate optional modules when required gateway capability is unavailable', async () => {
+    const { repository } = fixture();
+    const modules = new ModuleService(repository, [{ key: 'core', defaultEnabled: true }, { key: 'logging', defaultEnabled: false }], new Set(['logging']));
+    await expect(modules.setEnabled(owner.guildId, 'logging', true, owner.userId)).rejects.toMatchObject({ code: 'VALIDATION' });
+    expect(await modules.isEnabled(owner.guildId, 'logging')).toBe(false);
+  });
   it('does not expose internal test modules to guild management', async () => {
     const { repository } = fixture();
     const modules = new ModuleService(repository, [{ key: 'core', defaultEnabled: true }, { key: 'test', defaultEnabled: false, internal: true }]);

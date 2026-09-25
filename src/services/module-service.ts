@@ -5,14 +5,14 @@ export type ModuleDefinition = { key: string; defaultEnabled: boolean; dependenc
 export class ModuleService {
   private readonly definitions: Map<string, ModuleDefinition>;
   constructor(private readonly repository: Pick<GuildRepository, 'getModuleState' | 'setModuleState' | 'listModuleStates'>,
-    definitions: readonly ModuleDefinition[]) {
+    definitions: readonly ModuleDefinition[], private readonly unavailable: ReadonlySet<string> = new Set()) {
     this.definitions = new Map(definitions.map(definition => [definition.key, definition]));
     if (this.definitions.size !== definitions.length || !this.definitions.has('core')) throw new Error('Invalid module registry');
   }
   async isEnabled(guildId: string, key: string, seen = new Set<string>()): Promise<boolean> {
     if (key === 'core') return true;
     const definition = this.definitions.get(key);
-    if (!definition || seen.has(key)) return false;
+    if (!definition || seen.has(key) || this.unavailable.has(key)) return false;
     seen.add(key);
     const override = await this.repository.getModuleState(guildId, key);
     if (!(override ?? definition.defaultEnabled)) return false;
@@ -26,6 +26,8 @@ export class ModuleService {
     const definition = this.definitions.get(key);
     if (!definition || definition.internal) throw new AppError('NOT_FOUND', 'Unknown module.');
     if (key === 'core') throw new AppError('VALIDATION', 'Core cannot be disabled or changed.');
+    if (enabled && this.unavailable.has(key))
+      throw new AppError('VALIDATION', 'This module requires the Server Members Intent enabled in the Discord Developer Portal and ENABLE_GUILD_MEMBERS_INTENT=true.');
     if (enabled) {
       for (const dependency of definition.dependencies ?? []) {
         if (!await this.isEnabled(guildId, dependency)) throw new AppError('CONFLICT', `Enable dependency ${dependency} first.`);
