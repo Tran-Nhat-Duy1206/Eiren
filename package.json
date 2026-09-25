@@ -1,0 +1,35 @@
+{
+  "name": "eiren-discord-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "packageManager": "pnpm@10.28.2",
+  "scripts": {
+    "dev": "tsx watch src/app/main.ts",
+    "start": "node dist/app/main.js",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "commands:register": "tsx src/app/register-commands.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/app/migrate.ts",
+    "db:check": "drizzle-kit check",
+    "db:smoke": "tsx src/app/db-smoke.ts"
+  },
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "drizzle-orm": "^0.45.1",
+    "pg": "^8.16.3",
+    "pino": "^10.3.1",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/pg": "^8.15.6",
+    "drizzle-kit": "^0.31.8",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.17"
+  }
+}
