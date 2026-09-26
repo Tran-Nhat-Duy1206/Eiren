@@ -10,7 +10,7 @@ export const rankCommand: Command = {
   async execute(interaction, services) {
     const user = interaction.options.getUser('user') ?? interaction.user;
     const rank = await services.levels.rank(guild(interaction.guildId), user.id);
-    await interaction.editReply({ content: rank ? `<@${user.id}>: level ${rank.level}, ${rank.xp} XP, ${rank.progress}/${rank.nextLevelXp} toward next level, rank ${rank.rank === null ? 'unranked' : `#${rank.rank}`} (${rank.messageCount} XP-worthy messages).` : 'No XP earned yet.', allowedMentions: { parse: [] } });
+    await interaction.editReply({ content: rank ? `<@${user.id}>: level ${rank.level}, ${rank.xp} XP, ${rank.nextLevelXp === null ? 'maximum safe XP level' : `${rank.progress}/${rank.nextLevelXp} toward next level`}, rank ${rank.rank === null ? 'unranked' : `#${rank.rank}`} (${rank.messageCount} XP-worthy messages).` : 'No XP earned yet.', allowedMentions: { parse: [] } });
   },
 };
 export const leaderboardCommand: Command = {

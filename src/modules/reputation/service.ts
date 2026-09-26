@@ -19,7 +19,7 @@ export class ReputationService {
     return this.repository.configure(actor.guildId, config);
   }
   async score(guildId: string, userId: string) { return this.repository.score(guildId, userId); }
-  async grant(actor: Actor, receiverId: string, giverIsBot = false) {
+  async grant(actor: Actor, receiverId: string, giverIsBot = false, interactionId?: string) {
     await this.permissions.require(actor, 'MEMBER');
     if (giverIsBot || this.client.user?.id === actor.userId) throw new AppError('VALIDATION', 'Bots cannot grant reputation.');
     if (receiverId === actor.userId) throw new AppError('VALIDATION', 'You cannot give reputation to yourself.');
@@ -32,7 +32,7 @@ export class ReputationService {
     if (this.minAccountAgeSeconds > 0 && [giver, member].some(value =>
       Date.now() - value.user.createdAt.getTime() < this.minAccountAgeSeconds * 1000))
       throw new AppError('VALIDATION', 'Both accounts must be at least one hour old to grant reputation.');
-    return this.repository.grant(actor.guildId, actor.userId, receiverId);
+    return this.repository.grant(actor.guildId, actor.userId, receiverId, interactionId);
   }
 }
 export { defaultReputationConfig };

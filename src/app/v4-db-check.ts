@@ -33,7 +33,7 @@ try {
       'starboard_messages', 'starboard_ignored_channels')`);
   assert('tenV4Tables', tables.rows.length === 10 && expected.every(name => tables.rows.some(row => row.table_name === name)));
   const journal = await db.execute(sql`select count(*)::int as count from drizzle.__drizzle_migrations`);
-  assert('journalAtLeastFive', Number(journal.rows[0]?.count) >= 5);
+  assert('journalAtLeastSix', Number(journal.rows[0]?.count) >= 6);
   await db.insert(guilds).values([{ id: guildId }, { id: lockGuildId }]);
   const levels = new LevelsRepository(db), levelsAgain = new LevelsRepository(db);
   const rep = new ReputationRepository(db), repAgain = new ReputationRepository(db);
@@ -72,6 +72,19 @@ try {
     await repAgain.score(guildId, ids.three) === 2);
   const history = await db.select().from(reputationGrants).where(eq(reputationGrants.guildId, guildId));
   assert('reputationHistory', history.length === 3 && history.filter(row => row.receiverId === ids.three).length === 2);
+  // Move the persisted grant into the past: the replay must remain inert even after both cooldowns expire.
+  await rep.configure(guildId, { globalCooldownSeconds: 60, sameTargetCooldownSeconds: 60 });
+  const replayId = `rep-replay-${randomUUID()}`;
+  assert('reputationReplayFirstGrant', await rep.grant(guildId, ids.three, ids.four, replayId) === 2);
+  await db.update(reputationGrants).set({ createdAt: new Date(Date.now() - 61_000) })
+    .where(eq(reputationGrants.interactionId, replayId));
+  assert('reputationReplayBeyondCooldown', await repAgain.grant(guildId, ids.three, ids.four, replayId) === 2 &&
+    await repAgain.score(guildId, ids.four) === 2);
+  assert('reputationReplayDifferentTargetRejected', await rejected(() => repAgain.grant(guildId, ids.three, ids.one, replayId)));
+  assert('reputationReplayDifferentGiverRejected', await rejected(() => repAgain.grant(guildId, ids.two, ids.four, replayId)));
+  assert('reputationDistinctInteractionAllowed', await repAgain.grant(guildId, ids.three, ids.four, `rep-new-${randomUUID()}`) === 3);
+  const replayHistory = await db.select().from(reputationGrants).where(eq(reputationGrants.guildId, guildId));
+  assert('reputationReplayHistory', replayHistory.length === 5 && replayHistory.filter(row => row.interactionId === replayId).length === 1);
 
   stage = 'starboard';
   const source = { guildId, sourceChannelId: 'channel', sourceMessageId: 'source', sourceAuthorId: ids.one };
@@ -119,6 +132,25 @@ try {
     assert('sharedReconcileLockBlocksIgnore', blocked);
     assert('ignorePersistsAfterPublish', completed && await starsAgain.ignored(lockGuildId, channelId) &&
       (await starsAgain.postsFrom(lockGuildId, channelId)).length === 1);
+    let releaseDestination!: () => void;
+    let reachedDestination!: () => void;
+    const destinationGate = new Promise<void>(resolve => { releaseDestination = resolve; });
+    const destinationEntered = new Promise<void>(resolve => { reachedDestination = resolve; });
+    const destinationHolder = stars.reconcileTransaction(lockGuildId, channelId, async () => {
+      reachedDestination(); await destinationGate;
+    });
+    try {
+      await destinationEntered;
+      let scanned = false;
+      const destinationScan = starsAgain.postedAfterDestinationBarrier(lockGuildId).then(rows => {
+        scanned = true; return rows;
+      });
+      await new Promise<void>(resolve => setTimeout(resolve, 30));
+      const waited = !scanned;
+      releaseDestination();
+      const [, rows] = await Promise.all([destinationHolder, destinationScan]);
+      assert('destinationChangeWaitsForPublish', waited && rows.length === 1);
+    } finally { releaseDestination(); await destinationHolder.catch(() => undefined); }
   } finally {
     release();
     await locked?.catch(() => undefined);

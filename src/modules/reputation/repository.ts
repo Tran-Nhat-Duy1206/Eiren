@@ -23,10 +23,21 @@ export class ReputationRepository {
     return row?.score ?? 0;
   }
   /** Serializes all grants from one giver in one guild across processes and restarts. */
-  async grant(guildId: string, giverId: string, receiverId: string): Promise<number> {
+  async grant(guildId: string, giverId: string, receiverId: string, interactionId?: string): Promise<number> {
     return this.db.transaction(async tx => {
       // A two-text advisory key avoids JS integer precision loss and hash collisions are merely extra serialization.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), hashtext(${giverId}))`);
+      if (interactionId !== undefined) {
+        const [prior] = await tx.select({ giverId: reputationGrants.giverId, receiverId: reputationGrants.receiverId })
+          .from(reputationGrants).where(and(eq(reputationGrants.guildId, guildId), eq(reputationGrants.interactionId, interactionId)));
+        if (prior) {
+          if (prior.giverId !== giverId || prior.receiverId !== receiverId)
+            throw new AppError('CONFLICT', 'Reputation interaction was already used for a different grant.');
+          const [score] = await tx.select({ score: memberReputation.score }).from(memberReputation)
+            .where(and(eq(memberReputation.guildId, guildId), eq(memberReputation.userId, receiverId)));
+          return score?.score ?? 0;
+        }
+      }
       const [config] = await tx.select().from(reputationSettings).where(eq(reputationSettings.guildId, guildId));
       const limits = config ?? defaultReputationConfig;
       const clock = await tx.execute(sql`SELECT clock_timestamp() AS now`);
@@ -43,7 +54,7 @@ export class ReputationRepository {
         const seconds = Math.ceil(Math.max(globalRemaining, targetRemaining) / 1000);
         throw new AppError('CONFLICT', `Reputation cooldown: try again in ${seconds} seconds.`);
       }
-      await tx.insert(reputationGrants).values({ guildId, giverId, receiverId, createdAt: now });
+      await tx.insert(reputationGrants).values({ guildId, giverId, receiverId, interactionId, createdAt: now });
       const [row] = await tx.insert(memberReputation).values({ guildId, userId: receiverId, score: 1, updatedAt: now })
         .onConflictDoUpdate({ target: [memberReputation.guildId, memberReputation.userId],
           set: { score: sql`${memberReputation.score} + 1`, updatedAt: now } }).returning({ score: memberReputation.score });

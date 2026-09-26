@@ -21,14 +21,15 @@ export class StarboardService {
       if (!changes.channelId && !existing?.channelId) throw new AppError('VALIDATION', 'Configure a starboard channel first.');
       await (await this.gateway(actor.guildId)).validateChannel(changes.channelId ?? existing!.channelId!);
     }
-    const before = changes.channelId ? await this.repository.settings(actor.guildId) : null;
+    const before = await this.repository.settings(actor.guildId);
     const updated = await this.repository.configure(actor.guildId, changes);
-    if (changes.channelId && before?.channelId && before.channelId !== changes.channelId && updated.enabled) {
-      // Move existing mirrors promptly; a failed move retains its old DB mapping for a later retry.
+    if (before && (before.channelId !== updated.channelId || before.enabled !== updated.enabled ||
+      before.threshold !== updated.threshold || before.emoji !== updated.emoji || before.allowSelf !== updated.allowSelf)) {
+      // Recheck every published mirror after the settings write; its FOR SHARE lock serializes in-flight publication.
       for (const row of await this.repository.postsFrom(actor.guildId)) {
         try { await this.reconcile(actor.guildId, row.sourceChannelId, row.sourceMessageId); }
         catch (error) { this.logger.error({ errorType: error instanceof Error ? error.name : 'unknown',
-          guildId: actor.guildId, sourceMessageId: row.sourceMessageId }, 'Starboard channel migration needs reconciliation'); }
+          guildId: actor.guildId, sourceMessageId: row.sourceMessageId }, 'Starboard configuration needs reconciliation'); throw error; }
       }
     }
     return updated;
@@ -43,8 +44,18 @@ export class StarboardService {
       }
     } else await this.repository.allow(actor.guildId, channelId);
   }
+  async sourceChannelUpdated(guildId: string, channelId: string) {
+    const settings = await this.repository.settings(guildId);
+    // An NSFW destination turned SFW must withdraw every incompatible source, even without reactions.
+    // The destination barrier waits for in-flight publications before taking its POSTED snapshot.
+    const rows = channelId === settings?.channelId
+      ? await this.repository.postedAfterDestinationBarrier(guildId)
+      : await this.repository.postedAfterChannelBarrier(guildId, channelId);
+    for (const row of rows) await this.reconcile(guildId, row.sourceChannelId, row.sourceMessageId);
+  }
   async sourceChannelDeleted(guildId: string, channelId: string) {
-    for (const row of await this.repository.postsFrom(guildId, channelId)) {
+    // Wait for publications already in flight before scanning the now-deleted channel.
+    for (const row of await this.repository.postedAfterChannelBarrier(guildId, channelId)) {
       try { await this.reconcile(guildId, channelId, row.sourceMessageId, true); }
       catch (error) { this.logger.error({ errorType: error instanceof Error ? error.name : 'unknown', guildId,
         channelId, sourceMessageId: row.sourceMessageId }, 'Deleted source channel needs starboard reconciliation'); }
@@ -54,11 +65,24 @@ export class StarboardService {
   async reconcile(guildId: string, channelId: string, messageId: string, deleted = false) {
     const initial = await this.repository.settings(guildId);
     if (!initial?.channelId) return;
+    if (deleted) {
+      const gateway = await this.gateway(guildId);
+      await this.repository.reconcileTransaction(guildId, channelId, async tx => {
+        const row = await this.repository.lock(tx, { guildId, sourceChannelId: channelId,
+          sourceMessageId: messageId, sourceAuthorId: 'deleted' });
+        if (row.starboardChannelId && row.starboardMessageId)
+          await gateway.remove(row.starboardChannelId, row.starboardMessageId);
+        await this.repository.save(tx, row, { status: 'DELETED', starCount: 0,
+          starboardChannelId: null, starboardMessageId: null });
+        await this.repository.pruneDeleted(tx, guildId);
+      });
+      return;
+    }
     const excluded = channelId === initial.channelId || await this.repository.ignored(guildId, channelId);
-    if (!initial.enabled && !excluded && !deleted) return;
+    if (!initial.enabled && !excluded && !(await this.repository.get(guildId, messageId))) return;
     const gateway = await this.gateway(guildId);
     // Preflight avoids retaining a row for every unstarred message; it is NOT the authoritative privacy check.
-    const preflight = !deleted && !excluded ? await gateway.source(channelId, messageId) : null;
+    const preflight = initial.enabled && !excluded ? await gateway.source(channelId, messageId) : null;
     const preflightBlocked = preflight && ((preflight.bot && !initial.allowBotMessages) ||
       (preflight.nsfw && !await gateway.isNsfw(initial.channelId)) || !preflight.public);
     const candidate = preflightBlocked ? null : preflight;
@@ -74,8 +98,7 @@ export class StarboardService {
         const settings = await this.repository.settings(guildId, tx); // FOR SHARE coordinates configuration changes.
         const ignored = await this.repository.ignored(guildId, channelId, tx);
         if (!settings?.channelId) return;
-        if (!settings.enabled && !ignored && !deleted) return;
-        const fresh = !deleted && !ignored && channelId !== settings.channelId ? await gateway.source(channelId, messageId) : null;
+        const fresh = settings.enabled && !ignored && channelId !== settings.channelId ? await gateway.source(channelId, messageId) : null;
         const blocked = fresh && ((fresh.bot && !settings.allowBotMessages) ||
           (fresh.nsfw && !await gateway.isNsfw(settings.channelId)) || !fresh.public);
         const source = blocked ? null : fresh;

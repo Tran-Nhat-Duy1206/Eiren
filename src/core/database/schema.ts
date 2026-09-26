@@ -369,8 +369,10 @@ export const reputationGrants = pgTable('reputation_grants', {
   guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
   giverId: text('giver_id').notNull(),
   receiverId: text('receiver_id').notNull(),
+  interactionId: text('interaction_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [
+  uniqueIndex('reputation_grants_guild_interaction_unique').on(table.guildId, table.interactionId),
   index('reputation_grants_giver_recent_idx').on(table.guildId, table.giverId, table.createdAt.desc()),
   index('reputation_grants_target_recent_idx').on(table.guildId, table.giverId, table.receiverId, table.createdAt.desc()),
   index('reputation_grants_receiver_idx').on(table.guildId, table.receiverId),

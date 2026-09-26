@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { ChannelType, PermissionFlagsBits, type Client, type Guild } from 'discord.js';
 import { AppError } from '../../core/errors/errors.js';
 import type { GuildLogNotifier } from '../../services/log-notifier.js';
-import { levelForXp, xpForLevel } from './formula.js';
+import { levelForXp, progressForXp } from './formula.js';
 import { LevelsRepository } from './repository.js';
 
 const dangerous = PermissionFlagsBits.Administrator | PermissionFlagsBits.ManageGuild | PermissionFlagsBits.ManageRoles |
@@ -71,11 +71,8 @@ export class LevelsService {
   }
   async rank(guildId: string, userId: string) {
     const row = await this.repository.member(guildId, userId);
-    if (!row) return { guildId, userId, xp: 0, messageCount: 0, level: 0, progress: 0,
-      nextLevelXp: xpForLevel(1), rank: null };
-    const level = levelForXp(row.xp);
-    return { ...row, level, progress: row.xp - xpForLevel(level), nextLevelXp: xpForLevel(level + 1) - xpForLevel(level),
-      rank: await this.repository.rank(guildId, userId, row.xp) };
+    if (!row) return { guildId, userId, xp: 0, messageCount: 0, ...progressForXp(0), rank: null };
+    return { ...row, ...progressForXp(row.xp), rank: await this.repository.rank(guildId, userId, row.xp) };
   }
   async leaderboard(guildId: string) {
     return (await this.repository.top(guildId, 10)).map((row, index) => ({ ...row, level: levelForXp(row.xp), rank: index + 1 }));

@@ -17,7 +17,7 @@ const rep: Command = {
   async execute(interaction, services: Services) {
     const actor = await actorFor(interaction);
     const target = interaction.options.getUser('member', true);
-    const score = await services.reputation.grant(actor, target.id, interaction.user.bot);
+    const score = await services.reputation.grant(actor, target.id, interaction.user.bot, interaction.id);
     await interaction.editReply({ content: `Reputation given to <@${target.id}>. Score: ${score}.`, allowedMentions: { parse: [] } });
   },
 };

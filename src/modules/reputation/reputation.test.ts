@@ -23,7 +23,9 @@ describe('reputation authorization and validation', () => {
     const f = fixture();
     await expect(f.service.grant(actor, 'target')).resolves.toBe(1);
     expect(f.fetchMember).toHaveBeenCalledWith('target');
-    expect(f.grant).toHaveBeenCalledWith('guild', 'giver', 'target');
+    expect(f.grant).toHaveBeenCalledWith('guild', 'giver', 'target', undefined);
+    await expect(f.service.grant(actor, 'target', false, 'interaction-1')).resolves.toBe(1);
+    expect(f.grant).toHaveBeenLastCalledWith('guild', 'giver', 'target', 'interaction-1');
     for (const options of [{ bot: true }, { missing: true }, { age: 1 }, { giverAge: 1 }]) {
       const invalid = fixture(options);
       await expect(invalid.service.grant(actor, 'target')).rejects.toThrow();

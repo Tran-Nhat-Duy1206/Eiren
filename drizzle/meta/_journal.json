@@ -36,6 +36,13 @@
       "when": 1790428351571,
       "tag": "0004_silent_the_fallen",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790444750192,
+      "tag": "0005_bumpy_forgotten_one",
+      "breakpoints": true
     }
   ]
 }

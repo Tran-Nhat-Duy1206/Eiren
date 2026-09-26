@@ -18,7 +18,7 @@ export const profileCommands: Command[] = [{
       `Joined: ${member.joinedAt ? `<t:${Math.floor(member.joinedAt.getTime() / 1000)}:D>` : 'Unknown'}`];
     if ('levels' in profile) {
       const level = profile.levels;
-      lines.push(level ? `Level ${level.level} · ${level.xp} XP · ${level.progress}/${level.nextLevelXp} toward next level · Rank ${level.rank ?? 'unranked'} · ${level.messageCount} XP-worthy messages`
+      lines.push(level ? `Level ${level.level} · ${level.xp} XP · ${level.nextLevelXp === null ? 'maximum safe XP level' : `${level.progress}/${level.nextLevelXp} toward next level`} · Rank ${level.rank ?? 'unranked'} · ${level.messageCount} XP-worthy messages`
         : 'Level 0 · 0 XP · Unranked');
     }
     if ('reputation' in profile) lines.push(`Reputation: ${profile.reputation ?? 0}`);

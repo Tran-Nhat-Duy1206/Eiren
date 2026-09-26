@@ -14,6 +14,14 @@ export function xpForLevel(level: number): number {
     throw new RangeError('Level exceeds safe integer XP range.');
   return level * level * 100;
 }
+export function progressForXp(xp: number) {
+  const level = levelForXp(xp);
+  const floor = xpForLevel(level);
+  const next = 100 * (level + 1) * (level + 1);
+  // A bigint-backed XP aggregate is deliberately capped to JS safe integers. At the terminal
+  // representable level, no next reachable threshold exists and UI must not throw.
+  return { level, progress: xp - floor, nextLevelXp: Number.isSafeInteger(next) ? next - floor : null };
+}
 export function eligibleMessage(input: { messageId: string; at: number; content?: string | null },
   prior: { lastMessageId: string | null; lastXpAt: Date | null; lastFingerprint: string | null },
   cooldownSeconds: number, fingerprint: string | null): boolean {

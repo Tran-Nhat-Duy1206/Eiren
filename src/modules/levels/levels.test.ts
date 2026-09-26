@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ChannelType } from 'discord.js';
-import { eligibleMessage, levelForXp, xpForLevel } from './formula.js';
+import { eligibleMessage, levelForXp, progressForXp, xpForLevel } from './formula.js';
 import { LevelsService } from './service.js';
 import type { LevelsRepository } from './repository.js';
 
@@ -16,6 +16,16 @@ describe('levels formula and eligibility', () => {
     expect(levelForXp(Number.MAX_SAFE_INTEGER)).toBe(9_490_626);
     expect(() => levelForXp(-1)).toThrow();
     expect(() => levelForXp(Number.MAX_SAFE_INTEGER + 1)).toThrow();
+  });
+  it('renders terminal safe-XP level without overflowing the next threshold', async () => {
+    const terminal = levelForXp(Number.MAX_SAFE_INTEGER);
+    const boundary = xpForLevel(terminal);
+    expect(progressForXp(boundary - 1)).toMatchObject({ level: terminal - 1, nextLevelXp: expect.any(Number) });
+    expect(progressForXp(boundary)).toEqual({ level: terminal, progress: 0, nextLevelXp: null });
+    expect(progressForXp(Number.MAX_SAFE_INTEGER)).toMatchObject({ level: terminal, nextLevelXp: null });
+    const repository = { member: vi.fn().mockResolvedValue({ xp: boundary, messageCount: 1 }), rank: vi.fn().mockResolvedValue(1) };
+    const service = new LevelsService(repository as unknown as LevelsRepository, {} as never);
+    await expect(service.rank('g', 'u')).resolves.toMatchObject({ level: terminal, progress: 0, nextLevelXp: null, rank: 1 });
   });
   it('rejects duplicate ID, old timestamps, cooldown and matching fingerprint', () => {
     expect(eligibleMessage({ messageId: 'old', at: 200_000 }, prior, 60, null)).toBe(false);

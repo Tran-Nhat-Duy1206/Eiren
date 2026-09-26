@@ -16,6 +16,9 @@ export const starboardEvents: BotEvent[] = [
     async handle(services, _old, current) { const message = current as Message; if (message.guildId) await services.starboard.reconcile(message.guildId, message.channelId, message.id); } },
   { name: Events.MessageDelete, moduleKey: 'starboard', guildId: guild,
     async handle(services, value) { const message = value as Message; if (message.guildId) await services.starboard.reconcile(message.guildId, message.channelId, message.id, true); } },
+  { name: Events.ChannelUpdate, moduleKey: 'starboard', guildId: (_old, current) => guild(current),
+    async handle(services, _old, current) { const channel = current as GuildChannel;
+      if (channel.guildId) await services.starboard.sourceChannelUpdated(channel.guildId, channel.id); } },
   { name: Events.ChannelDelete, moduleKey: 'starboard', guildId: guild,
     async handle(services, value) { const channel = value as GuildChannel; if (channel.guildId) await services.starboard.sourceChannelDeleted(channel.guildId, channel.id); } },
 ];

@@ -100,6 +100,9 @@ try {
         throw new Error('Level reward range constraint failed');
       if (!await rejected(inner => inner.insert(reputationGrants).values({ guildId, giverId: guildId, receiverId: guildId })))
         throw new Error('Reputation self-grant constraint failed');
+      await tx.insert(reputationGrants).values({ guildId, giverId: guildId, receiverId: `${guildId}2`, interactionId: 'smoke-interaction' });
+      if (!await rejected(inner => inner.insert(reputationGrants).values({ guildId, giverId: guildId, receiverId: `${guildId}3`, interactionId: 'smoke-interaction' })))
+        throw new Error('Reputation interaction uniqueness constraint failed');
       if (!await rejected(inner => inner.insert(memberReputation).values({ guildId, userId: `${guildId}2`, score: -1 })))
         throw new Error('Member reputation score constraint failed');
       if (!await rejected(inner => inner.insert(starboardMessages).values({ guildId, sourceChannelId: guildId,

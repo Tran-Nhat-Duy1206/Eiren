@@ -5,7 +5,7 @@ export interface ProfileLevel {
   xp: number;
   level: number;
   progress: number;
-  nextLevelXp: number;
+  nextLevelXp: number | null;
   rank: number | null;
   messageCount: number;
 }

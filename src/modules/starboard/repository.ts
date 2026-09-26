@@ -27,11 +27,28 @@ export class StarboardRepository {
       eq(starboardMessages.status, 'POSTED'), ...(channelId ? [eq(starboardMessages.sourceChannelId, channelId)] : [])));
   }
   private channelKey(guildId: string, channelId: string) { return `starboard-channel:${guildId}:${channelId}`; }
-  /** Shared lock permits parallel sources, but serializes an ignore insertion against any in-flight publication. */
+  private destinationKey(guildId: string) { return `starboard-destination:${guildId}`; }
+  /** Shared locks permit parallel sources; destination changes and ignored sources acquire exclusive barriers. */
   async reconcileTransaction<T>(guildId: string, channelId: string, work: (tx: StarboardTransaction) => Promise<T>): Promise<T> {
     return this.db.transaction(async tx => {
+      await tx.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended(${this.destinationKey(guildId)}, 0))`);
       await tx.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended(${this.channelKey(guildId, channelId)}, 0))`);
       return work(tx);
+    });
+  }
+  /** Destination NSFW/privacy changes must wait for every in-flight source publication before scanning. */
+  async postedAfterDestinationBarrier(guildId: string) {
+    return this.db.transaction(async tx => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${this.destinationKey(guildId)}, 0))`);
+      return tx.select().from(starboardMessages).where(and(eq(starboardMessages.guildId, guildId), eq(starboardMessages.status, 'POSTED')));
+    });
+  }
+  /** Barrier for source-channel changes: wait for all in-flight first publications before scanning. */
+  async postedAfterChannelBarrier(guildId: string, channelId: string) {
+    return this.db.transaction(async tx => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${this.channelKey(guildId, channelId)}, 0))`);
+      return tx.select().from(starboardMessages).where(and(eq(starboardMessages.guildId, guildId),
+        eq(starboardMessages.sourceChannelId, channelId), eq(starboardMessages.status, 'POSTED')));
     });
   }
   async ignore(guildId: string, channelId: string) {
@@ -51,6 +68,13 @@ export class StarboardRepository {
       .where(and(eq(starboardMessages.guildId, input.guildId), eq(starboardMessages.sourceMessageId, input.sourceMessageId))).for('update');
     if (!row) throw new Error('Starboard row unavailable after insertion');
     return row;
+  }
+  /** Bound lazy tombstone retention work per deletion; recent deletes remain durable against late events. */
+  async pruneDeleted(tx: StarboardTransaction, guildId: string) {
+    await tx.execute(sql`delete from starboard_messages where id in (
+      select id from starboard_messages where guild_id = ${guildId} and status = 'DELETED'
+      and updated_at < now() - interval '2 days' limit 32 for update skip locked
+    )`);
   }
   async get(guildId: string, sourceMessageId: string) {
     const [row] = await this.db.select().from(starboardMessages).where(and(eq(starboardMessages.guildId, guildId), eq(starboardMessages.sourceMessageId, sourceMessageId)));
