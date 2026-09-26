@@ -23,6 +23,13 @@ import { reputationCommands } from '../modules/reputation/commands.js';
 import { starboardCommands } from '../modules/starboard/commands.js';
 import { starboardEvents } from '../modules/starboard/events.js';
 import { profileCommands } from '../modules/profiles/commands.js';
+import { eventCommands } from '../modules/events/commands.js';
+import { eventButtons } from '../modules/events/components.js';
+import { giveawayCommands } from '../modules/giveaways/commands.js';
+import { giveawayButtons } from '../modules/giveaways/components.js';
+import { tempvoiceCommands } from '../modules/tempvoice/commands.js';
+import { tempvoiceEvents } from '../modules/tempvoice/events.js';
+import { achievementsCommands } from '../modules/achievements/commands.js';
 
 export interface ModuleManifest {
   definition: ModuleDefinition;
@@ -47,6 +54,10 @@ export const manifests: readonly ModuleManifest[] = [
   { definition: { key: 'reputation', defaultEnabled: false }, commands: reputationCommands, events: [] },
   { definition: { key: 'starboard', defaultEnabled: false }, commands: starboardCommands, events: starboardEvents },
   { definition: { key: 'profiles', defaultEnabled: false }, commands: profileCommands, events: [] },
+  { definition: { key: 'events', defaultEnabled: false }, commands: eventCommands, events: [], components: eventButtons },
+  { definition: { key: 'giveaways', defaultEnabled: false }, commands: giveawayCommands, events: [], components: giveawayButtons },
+  { definition: { key: 'tempvoice', defaultEnabled: false }, commands: tempvoiceCommands, events: tempvoiceEvents },
+  { definition: { key: 'achievements', defaultEnabled: false }, commands: achievementsCommands, events: [] },
 ];
 
 export function buildRegistry(modules: readonly ModuleManifest[]) {
