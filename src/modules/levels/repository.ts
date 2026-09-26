@@ -68,7 +68,7 @@ export class LevelsRepository {
       else await tx.insert(memberLevels).values(values);
       const rewards = after > before ? await tx.select().from(levelRewards).where(and(eq(levelRewards.guildId, input.guildId),
         sql`${levelRewards.level} > ${before}`, sql`${levelRewards.level} <= ${after}`)) : [];
-      return { xp, before, after, rewards };
+      return { xp, before, after, messageCount: values.messageCount, rewards };
     });
   }
 }

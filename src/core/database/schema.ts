@@ -417,3 +417,165 @@ export const starboardMessages = pgTable('starboard_messages', {
   check('starboard_messages_status_check', sql`${table.status} IN ('PENDING','POSTED','REMOVED','DELETED')`),
   check('starboard_messages_count_check', sql`${table.starCount} >= 0`),
 ]);
+
+// V5 optional community events. All scheduled times are absolute timestamptz values.
+export const communityEvents = pgTable('community_events', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  creatorId: text('creator_id').notNull(),
+  title: text('title').notNull(),
+  description: text('description').notNull(),
+  startAt: timestamp('start_at', { withTimezone: true }).notNull(),
+  endAt: timestamp('end_at', { withTimezone: true }),
+  channelId: text('channel_id').notNull(),
+  announcementMessageId: text('announcement_message_id'),
+  presentationPending: boolean('presentation_pending').notNull().default(true),
+  presentationRetryAt: timestamp('presentation_retry_at', { withTimezone: true }),
+  maxParticipants: integer('max_participants'),
+  status: text('status').notNull().default('SCHEDULED'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  index('community_events_guild_start_idx').on(table.guildId, table.startAt),
+  index('community_events_due_idx').on(table.status, table.startAt, table.endAt),
+  index('community_events_presentation_due_idx').on(table.presentationPending, table.presentationRetryAt),
+  check('community_events_status_check', sql`${table.status} IN ('SCHEDULED','ACTIVE','COMPLETED','CANCELLED')`),
+  check('community_events_time_check', sql`${table.endAt} IS NULL OR ${table.endAt} > ${table.startAt}`),
+  check('community_events_capacity_check', sql`${table.maxParticipants} IS NULL OR ${table.maxParticipants} BETWEEN 1 AND 10000`),
+  check('community_events_title_check', sql`length(trim(${table.title})) BETWEEN 1 AND 256`),
+  check('community_events_description_check', sql`length(${table.description}) <= 2000`),
+]);
+
+export const eventParticipants = pgTable('event_participants', {
+  eventId: bigint('event_id', { mode: 'number' }).notNull().references(() => communityEvents.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  joinedAt: timestamp('joined_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [primaryKey({ columns: [table.eventId, table.userId] })]);
+
+// Confirmed attendance is distinct from RSVP and only staff/organizer may record it.
+export const eventAttendance = pgTable('event_attendance', {
+  eventId: bigint('event_id', { mode: 'number' }).notNull().references(() => communityEvents.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  markedBy: text('marked_by').notNull(),
+  markedAt: timestamp('marked_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [primaryKey({ columns: [table.eventId, table.userId] })]);
+
+export const eventReminders = pgTable('event_reminders', {
+  eventId: bigint('event_id', { mode: 'number' }).notNull().references(() => communityEvents.id, { onDelete: 'cascade' }),
+  offsetSeconds: integer('offset_seconds').notNull(),
+  status: text('status').notNull().default('PENDING'),
+  claimedAt: timestamp('claimed_at', { withTimezone: true }),
+  deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+  messageId: text('message_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  primaryKey({ columns: [table.eventId, table.offsetSeconds] }),
+  index('event_reminders_status_claim_idx').on(table.status, table.claimedAt),
+  check('event_reminders_offset_check', sql`${table.offsetSeconds} IN (600,3600,86400)`),
+  check('event_reminders_status_check', sql`${table.status} IN ('PENDING','PROCESSING','DELIVERED','CANCELLED')`),
+]);
+
+// V5 giveaways. Entrants, draws and historical winners are authoritative, not Discord reactions.
+export const giveaways = pgTable('giveaways', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  creatorId: text('creator_id').notNull(),
+  channelId: text('channel_id').notNull(),
+  messageId: text('message_id'),
+  prize: text('prize').notNull(),
+  startAt: timestamp('start_at', { withTimezone: true }).notNull().defaultNow(),
+  endAt: timestamp('end_at', { withTimezone: true }).notNull(),
+  winnerCount: integer('winner_count').notNull(),
+  status: text('status').notNull().default('ACTIVE'),
+  requiredRoleId: text('required_role_id'),
+  minAccountAgeSeconds: integer('min_account_age_seconds'),
+  minGuildAgeSeconds: integer('min_guild_age_seconds'),
+  requireVerified: boolean('require_verified').notNull().default(false),
+  minLevel: integer('min_level'),
+  resultAnnouncementId: text('result_announcement_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  index('giveaways_guild_status_idx').on(table.guildId, table.status),
+  index('giveaways_due_idx').on(table.status, table.endAt),
+  check('giveaways_prize_check', sql`length(trim(${table.prize})) BETWEEN 1 AND 256`),
+  check('giveaways_time_check', sql`${table.endAt} > ${table.startAt}`),
+  check('giveaways_winners_check', sql`${table.winnerCount} BETWEEN 1 AND 20`),
+  check('giveaways_status_check', sql`${table.status} IN ('ACTIVE','ENDED','CANCELLED')`),
+  check('giveaways_account_age_check', sql`${table.minAccountAgeSeconds} IS NULL OR ${table.minAccountAgeSeconds} >= 0`),
+  check('giveaways_guild_age_check', sql`${table.minGuildAgeSeconds} IS NULL OR ${table.minGuildAgeSeconds} >= 0`),
+  check('giveaways_min_level_check', sql`${table.minLevel} IS NULL OR ${table.minLevel} BETWEEN 0 AND 10000`),
+]);
+
+export const giveawayEntries = pgTable('giveaway_entries', {
+  giveawayId: bigint('giveaway_id', { mode: 'number' }).notNull().references(() => giveaways.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  enteredAt: timestamp('entered_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [primaryKey({ columns: [table.giveawayId, table.userId] })]);
+
+export const giveawayDraws = pgTable('giveaway_draws', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  giveawayId: bigint('giveaway_id', { mode: 'number' }).notNull().references(() => giveaways.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull(),
+  resultAnnouncementId: text('result_announcement_id'),
+  notificationClaimedAt: timestamp('notification_claimed_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  index('giveaway_draws_notice_due_idx').on(table.resultAnnouncementId, table.notificationClaimedAt),
+  uniqueIndex('giveaway_draws_original_unique').on(table.giveawayId).where(sql`${table.kind} = 'ORIGINAL'`),
+  index('giveaway_draws_giveaway_idx').on(table.giveawayId),
+  check('giveaway_draws_kind_check', sql`${table.kind} IN ('ORIGINAL','REROLL')`),
+]);
+
+export const giveawayWinners = pgTable('giveaway_winners', {
+  drawId: bigint('draw_id', { mode: 'number' }).notNull().references(() => giveawayDraws.id, { onDelete: 'cascade' }),
+  giveawayId: bigint('giveaway_id', { mode: 'number' }).notNull().references(() => giveaways.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  ordinal: integer('ordinal').notNull(),
+}, table => [
+  primaryKey({ columns: [table.drawId, table.userId] }),
+  uniqueIndex('giveaway_winners_draw_ordinal_unique').on(table.drawId, table.ordinal),
+  index('giveaway_winners_giveaway_idx').on(table.giveawayId, table.userId),
+  check('giveaway_winners_ordinal_check', sql`${table.ordinal} BETWEEN 1 AND 20`),
+]);
+
+export const tempvoiceSettings = pgTable('tempvoice_settings', {
+  guildId: text('guild_id').primaryKey().references(() => guilds.id, { onDelete: 'cascade' }),
+  enabled: boolean('enabled').notNull().default(false),
+  lobbyChannelId: text('lobby_channel_id'),
+  categoryId: text('category_id'),
+  userLimit: integer('user_limit').notNull().default(0),
+  defaultPrivate: boolean('default_private').notNull().default(true),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  check('tempvoice_settings_limit_check', sql`${table.userLimit} BETWEEN 0 AND 99`),
+  check('tempvoice_settings_lobby_check', sql`NOT ${table.enabled} OR ${table.lobbyChannelId} IS NOT NULL`),
+]);
+
+export const tempvoiceRooms = pgTable('tempvoice_rooms', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  ownerId: text('owner_id').notNull(),
+  channelId: text('channel_id'),
+  status: text('status').notNull().default('CREATING'),
+  emptySince: timestamp('empty_since', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex('tempvoice_rooms_active_owner_unique').on(table.guildId, table.ownerId).where(sql`${table.status} IN ('CREATING','ACTIVE','DELETING')`),
+  uniqueIndex('tempvoice_rooms_guild_channel_unique').on(table.guildId, table.channelId),
+  index('tempvoice_rooms_empty_due_idx').on(table.status, table.emptySince),
+  check('tempvoice_rooms_status_check', sql`${table.status} IN ('CREATING','ACTIVE','DELETING','CLOSED')`),
+  check('tempvoice_rooms_active_channel_check', sql`${table.status} NOT IN ('ACTIVE','DELETING') OR ${table.channelId} IS NOT NULL`),
+]);
+
+// Static versioned registry lives in code; only earned public community IDs are persisted.
+export const memberAchievements = pgTable('member_achievements', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  achievementId: text('achievement_id').notNull(),
+  awardedAt: timestamp('awarded_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  primaryKey({ columns: [table.guildId, table.userId, table.achievementId] }),
+  index('member_achievements_member_awarded_idx').on(table.guildId, table.userId, table.awardedAt),
+]);

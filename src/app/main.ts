@@ -1,11 +1,14 @@
 import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
+import { and, eq } from 'drizzle-orm';
 import { loadEnv } from '../core/config/env.js';
 import { createDatabase } from '../core/database/connection.js';
 import { guilds, moderationCases, moderatorNotes, verificationSettings, memberVerifications, antiraidSettings, joinHistory,
   roleMenus, roleMenuOptions, ticketSettings, tickets as ticketRows, ticketParticipants, reports as reportRows, appeals,
   suggestionSettings, suggestions as suggestionRows, suggestionVotes,
   levelsSettings, memberLevels, levelRewards, levelIgnoredChannels, reputationSettings, memberReputation,
-  reputationGrants, starboardSettings, starboardMessages, starboardIgnoredChannels } from '../core/database/schema.js';
+  reputationGrants, starboardSettings, starboardMessages, starboardIgnoredChannels,
+  communityEvents, eventParticipants, eventAttendance, eventReminders, giveaways as giveawayRows,
+  giveawayEntries, giveawayDraws, giveawayWinners, tempvoiceSettings, tempvoiceRooms, memberAchievements } from '../core/database/schema.js';
 import { createLogger } from '../core/logger/logger.js';
 import { registerCommands } from '../core/commands/dispatcher.js';
 import { registerComponents, registerSelects } from '../core/components/component.js';
@@ -45,6 +48,18 @@ import { StarboardRepository } from '../modules/starboard/repository.js';
 import { StarboardService } from '../modules/starboard/service.js';
 import { DiscordStarboardGateway } from '../modules/starboard/discord-gateway.js';
 import { ProfileService } from '../modules/profiles/service.js';
+import { EventRepository } from '../modules/events/repository.js';
+import { EventService } from '../modules/events/service.js';
+import { DiscordEventGateway } from '../modules/events/discord-gateway.js';
+import { GiveawayRepository } from '../modules/giveaways/repository.js';
+import { GiveawayService } from '../modules/giveaways/service.js';
+import { DiscordGiveawayGateway } from '../modules/giveaways/discord-gateway.js';
+import { TempvoiceRepository } from '../modules/tempvoice/repository.js';
+import { TempvoiceService } from '../modules/tempvoice/service.js';
+import { DiscordTempvoiceGateway } from '../modules/tempvoice/discord-gateway.js';
+import { AchievementRepository } from '../modules/achievements/repository.js';
+import { AchievementsService } from '../modules/achievements/service.js';
+import { V5Scheduler } from './v5-scheduler.js';
 
 const env = loadEnv();
 const logger = createLogger(env.LOG_LEVEL);
@@ -97,19 +112,57 @@ const tickets = new TicketService(new TicketRepository(db), permissions, logger,
 const reports = new ReportService(new ReportRepository(db), permissions, notifier);
 const suggestions = new SuggestionService(new SuggestionRepository(db), permissions,
   async guildId => new DiscordSuggestionGateway(await client.guilds.fetch(guildId)), logger, { send: notifier });
-const levels = new LevelsService(new LevelsRepository(db), client, notifier);
-const reputation = new ReputationService(new ReputationRepository(db), permissions, client);
+const levelsRepository = new LevelsRepository(db);
+const reputationRepository = new ReputationRepository(db);
+const achievements = new AchievementsService(new AchievementRepository(db), modules, {
+  level: levelsRepository, reputation: reputationRepository,
+  eventJoin: async (guildId, userId) => Boolean((await db.select({ userId: eventParticipants.userId }).from(eventParticipants)
+    .innerJoin(communityEvents, eq(eventParticipants.eventId, communityEvents.id))
+    .where(and(eq(communityEvents.guildId, guildId), eq(eventParticipants.userId, userId))).limit(1))[0]),
+  eventAttend: async (guildId, userId) => Boolean((await db.select({ userId: eventAttendance.userId }).from(eventAttendance)
+    .innerJoin(communityEvents, eq(eventAttendance.eventId, communityEvents.id))
+    .where(and(eq(communityEvents.guildId, guildId), eq(eventAttendance.userId, userId))).limit(1))[0]),
+  giveawayWin: async (guildId, userId) => Boolean((await db.select({ userId: giveawayWinners.userId }).from(giveawayWinners)
+    .innerJoin(giveawayRows, eq(giveawayWinners.giveawayId, giveawayRows.id))
+    .where(and(eq(giveawayRows.guildId, guildId), eq(giveawayWinners.userId, userId))).limit(1))[0]),
+});
+async function achievementHook(guildId: string, userId: string, work: () => Promise<unknown>) {
+  try { await work(); }
+  catch (error) { logger.error({ guildId, userId, errorType: error instanceof Error ? error.name : 'unknown' },
+    'Optional achievement evaluation failed after domain state committed'); }
+}
+const levels = new LevelsService(levelsRepository, client, notifier,
+  (guildId, userId, level, messageCount) => achievementHook(guildId, userId,
+    () => achievements.onLevel(guildId, userId, level, messageCount)));
+const reputation = new ReputationService(reputationRepository, permissions, client, 3600,
+  (guildId, userId, score) => achievementHook(guildId, userId,
+    () => achievements.onReputation(guildId, userId, score)));
 const starboard = new StarboardService(new StarboardRepository(db), permissions,
   async guildId => new DiscordStarboardGateway(await client.guilds.fetch(guildId)), logger);
 const profiles = new ProfileService(modules, (guildId, userId) => levels.rank(guildId, userId),
   (guildId, userId) => reputation.score(guildId, userId));
+const events = new EventService(new EventRepository(db), permissions,
+  async guildId => new DiscordEventGateway(await client.guilds.fetch(guildId)), logger, {
+    onJoined: (guildId, userId) => achievementHook(guildId, userId, () => achievements.onEventJoin(guildId, userId)),
+    onAttended: (guildId, userId) => achievementHook(guildId, userId, () => achievements.onEventAttend(guildId, userId)),
+  }, guildId => modules.isEnabled(guildId, 'events'));
+const giveaways = new GiveawayService(new GiveawayRepository(db), permissions, modules,
+  async guildId => new DiscordGiveawayGateway(client, guildId), logger,
+  (guildId, userId) => achievementHook(guildId, userId, () => achievements.onGiveawayWin(guildId, userId)));
+const tempvoice = new TempvoiceService(new TempvoiceRepository(db), permissions, logger,
+  async guildId => new DiscordTempvoiceGateway(await client.guilds.fetch(guildId)));
 const services = { logger, repository, guildConfig, permissions, modules, guildLogs, moderation, verification, antiraid,
-  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles };
+  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements };
 const scheduler = new ModerationScheduler(moderation, async guildId => {
   const guild = await client.guilds.fetch(guildId);
   if (!client.user) throw new Error('Bot not logged in');
   return new DiscordModerationGateway(guild, client.user.id);
 }, logger);
+const v5Scheduler = new V5Scheduler([
+  { name: 'events', runDue: async () => { await events.runDue(); } },
+  { name: 'giveaways', runDue: async () => { await giveaways.runDue(); } },
+  { name: 'tempvoice', runDue: async () => { await tempvoice.runDue(); } },
+], logger);
 let retentionTimer: NodeJS.Timeout | undefined;
 async function pruneHistory() {
   try { await antiRaidRepository.pruneExpired(); }
@@ -145,6 +198,17 @@ const lifecycle = createBotLifecycle({
     await db.select({ id: starboardSettings.guildId }).from(starboardSettings).limit(1);
     await db.select({ id: starboardMessages.id }).from(starboardMessages).limit(1);
     await db.select({ id: starboardIgnoredChannels.guildId }).from(starboardIgnoredChannels).limit(1);
+    await db.select({ id: communityEvents.id }).from(communityEvents).limit(1);
+    await db.select({ id: eventParticipants.eventId }).from(eventParticipants).limit(1);
+    await db.select({ id: eventAttendance.eventId }).from(eventAttendance).limit(1);
+    await db.select({ id: eventReminders.eventId }).from(eventReminders).limit(1);
+    await db.select({ id: giveawayRows.id }).from(giveawayRows).limit(1);
+    await db.select({ id: giveawayEntries.giveawayId }).from(giveawayEntries).limit(1);
+    await db.select({ id: giveawayDraws.id }).from(giveawayDraws).limit(1);
+    await db.select({ id: giveawayWinners.drawId }).from(giveawayWinners).limit(1);
+    await db.select({ id: tempvoiceSettings.guildId }).from(tempvoiceSettings).limit(1);
+    await db.select({ id: tempvoiceRooms.id }).from(tempvoiceRooms).limit(1);
+    await db.select({ id: memberAchievements.guildId }).from(memberAchievements).limit(1);
   },
   register() {
     registerCommands(client, registry.commands, services);
@@ -153,6 +217,9 @@ const lifecycle = createBotLifecycle({
     registerSelects(client, registry.selects, services);
     client.once(Events.ClientReady, () => {
       scheduler.start();
+      void tempvoice.reconcileActive().catch(error => logger.error({ errorType: error instanceof Error ? error.name : 'unknown' },
+        'Temporary voice startup reconciliation failed'));
+      v5Scheduler.start();
       void pruneHistory();
       retentionTimer = setInterval(() => { void pruneHistory(); }, 60 * 60_000);
       retentionTimer.unref();
@@ -160,7 +227,7 @@ const lifecycle = createBotLifecycle({
   },
   login: () => client.login(env.DISCORD_TOKEN),
   destroy: () => client.destroy(),
-  closeDatabase: async () => { if (retentionTimer) clearInterval(retentionTimer); await scheduler.stop(); await pool.end(); },
+  closeDatabase: async () => { if (retentionTimer) clearInterval(retentionTimer); await scheduler.stop(); await v5Scheduler.stop(); await pool.end(); },
 });
 async function shutdown() {
   logger.info('Shutting down');

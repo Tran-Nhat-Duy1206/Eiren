@@ -15,6 +15,10 @@ import type { LevelsService } from '../modules/levels/service.js';
 import type { ReputationService } from '../modules/reputation/service.js';
 import type { StarboardService } from '../modules/starboard/service.js';
 import type { ProfileService } from '../modules/profiles/service.js';
+import type { EventService } from '../modules/events/service.js';
+import type { GiveawayService } from '../modules/giveaways/service.js';
+import type { TempvoiceService } from '../modules/tempvoice/service.js';
+import type { AchievementsService } from '../modules/achievements/service.js';
 
 export interface Services {
   logger: Logger;
@@ -34,4 +38,8 @@ export interface Services {
   reputation: ReputationService;
   starboard: StarboardService;
   profiles: ProfileService;
+  events: EventService;
+  giveaways: GiveawayService;
+  tempvoice: TempvoiceService;
+  achievements: AchievementsService;
 }

@@ -16,7 +16,8 @@
     "db:migrate": "tsx src/app/migrate.ts",
     "db:check": "drizzle-kit check",
     "db:smoke": "tsx src/app/db-smoke.ts",
-    "db:v4": "tsx src/app/v4-db-check.ts"
+    "db:v4": "tsx src/app/v4-db-check.ts",
+    "db:v5": "tsx src/app/v5-db-check.ts"
   },
   "dependencies": {
     "discord.js": "^14.25.1",

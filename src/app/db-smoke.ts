@@ -8,7 +8,10 @@ import { guilds, guildSettings, guildModules, guildPermissionRoles, moderationCa
   suggestionSettings, suggestions, suggestionVotes,
   levelsSettings, memberLevels, levelRewards, levelIgnoredChannels,
   reputationSettings, memberReputation, reputationGrants,
-  starboardSettings, starboardMessages, starboardIgnoredChannels } from '../core/database/schema.js';
+  starboardSettings, starboardMessages, starboardIgnoredChannels,
+  communityEvents, eventParticipants, eventAttendance, eventReminders,
+  giveaways, giveawayEntries, giveawayDraws, giveawayWinners,
+  tempvoiceSettings, tempvoiceRooms, memberAchievements } from '../core/database/schema.js';
 import { createLogger } from '../core/logger/logger.js';
 
 // An opt-in integration check against the configured real PostgreSQL instance.
@@ -73,6 +76,24 @@ try {
       const [readStar] = await tx.select().from(starboardMessages).where(eq(starboardMessages.guildId, guildId));
       if (readLevel?.xp !== 10 || readStar?.starCount !== 1)
         throw new Error('V4 records were not durable inside transaction');
+      const [event] = await tx.insert(communityEvents).values({ guildId, creatorId: guildId, title: 'Smoke event',
+        description: 'Fixture', channelId: guildId, startAt: new Date(Date.now() + 3600_000) }).returning();
+      const [eventParticipant] = await tx.insert(eventParticipants).values({ eventId: event!.id, userId: guildId }).returning();
+      const [attendance] = await tx.insert(eventAttendance).values({ eventId: event!.id, userId: guildId, markedBy: guildId }).returning();
+      const [reminder] = await tx.insert(eventReminders).values({ eventId: event!.id, offsetSeconds: 600 }).returning();
+      const [giveaway] = await tx.insert(giveaways).values({ guildId, creatorId: guildId, channelId: guildId,
+        prize: 'Smoke prize', endAt: new Date(Date.now() + 3600_000), winnerCount: 1 }).returning();
+      const [entry] = await tx.insert(giveawayEntries).values({ giveawayId: giveaway!.id, userId: guildId }).returning();
+      const [draw] = await tx.insert(giveawayDraws).values({ giveawayId: giveaway!.id, kind: 'ORIGINAL' }).returning();
+      const [winner] = await tx.insert(giveawayWinners).values({ giveawayId: giveaway!.id, drawId: draw!.id,
+        userId: guildId, ordinal: 1 }).returning();
+      const [voiceSetting] = await tx.insert(tempvoiceSettings).values({ guildId, enabled: true, lobbyChannelId: guildId }).returning();
+      const [room] = await tx.insert(tempvoiceRooms).values({ guildId, ownerId: guildId, channelId: guildId,
+        status: 'ACTIVE' }).returning();
+      const [achievement] = await tx.insert(memberAchievements).values({ guildId, userId: guildId,
+        achievementId: 'first-message' }).returning();
+      if (!event || !eventParticipant || !attendance || !reminder || !giveaway || !entry || !draw || !winner
+        || !voiceSetting || !room || !achievement) throw new Error('V5 fixture records were not readable');
       // Constraint checks run in savepoints so invalid writes can be attempted in one transaction.
       const rejected = async (work: (inner: typeof tx) => Promise<unknown>) => {
         try { await tx.transaction(work); return false; }
@@ -111,6 +132,18 @@ try {
       if (!await rejected(inner => inner.insert(starboardMessages).values({ guildId, sourceChannelId: guildId,
         sourceMessageId: `${guildId}2`, sourceAuthorId: guildId, status: 'INVALID' })))
         throw new Error('Starboard status constraint failed');
+      if (!await rejected(inner => inner.insert(eventParticipants).values({ eventId: event.id, userId: guildId })))
+        throw new Error('V5 event participant uniqueness failed');
+      if (!await rejected(inner => inner.insert(eventReminders).values({ eventId: event.id, offsetSeconds: 42 })))
+        throw new Error('V5 reminder offset constraint failed');
+      if (!await rejected(inner => inner.insert(giveawayEntries).values({ giveawayId: giveaway.id, userId: guildId })))
+        throw new Error('V5 giveaway entry uniqueness failed');
+      if (!await rejected(inner => inner.insert(giveawayDraws).values({ giveawayId: giveaway.id, kind: 'ORIGINAL' })))
+        throw new Error('V5 original draw uniqueness failed');
+      if (!await rejected(inner => inner.insert(tempvoiceRooms).values({ guildId, ownerId: guildId, status: 'CREATING' })))
+        throw new Error('V5 active room owner uniqueness failed');
+      if (!await rejected(inner => inner.insert(memberAchievements).values({ guildId, userId: guildId, achievementId: 'first-message' })))
+        throw new Error('V5 achievement uniqueness failed');
       throw rollback;
     });
     throw new Error('Smoke-test transaction did not roll back');
@@ -122,7 +155,13 @@ try {
   const [persistedLevel] = await db.select().from(memberLevels).where(eq(memberLevels.guildId, guildId));
   const [persistedStar] = await db.select().from(starboardMessages).where(eq(starboardMessages.guildId, guildId));
   if (persistedLevel || persistedStar) throw new Error('V4 smoke-test records persisted unexpectedly');
-  logger.info('PostgreSQL V0/V1/V2/V3/V4 schema, constraints and rollback smoke test passed');
+  const [persistedEvent] = await db.select().from(communityEvents).where(eq(communityEvents.guildId, guildId));
+  const [persistedGiveaway] = await db.select().from(giveaways).where(eq(giveaways.guildId, guildId));
+  const [persistedRoom] = await db.select().from(tempvoiceRooms).where(eq(tempvoiceRooms.guildId, guildId));
+  const [persistedAchievement] = await db.select().from(memberAchievements).where(eq(memberAchievements.guildId, guildId));
+  if (persistedEvent || persistedGiveaway || persistedRoom || persistedAchievement)
+    throw new Error('V5 smoke-test records persisted unexpectedly');
+  logger.info('PostgreSQL V0/V1/V2/V3/V4/V5 schema, constraints and rollback smoke test passed');
 } catch (error) {
   // Database driver exceptions can contain credentials; only emit the error class.
   logger.error({ errorType: error instanceof Error ? error.name : 'unknown' }, 'PostgreSQL smoke test failed');

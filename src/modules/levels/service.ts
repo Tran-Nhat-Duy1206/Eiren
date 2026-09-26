@@ -13,7 +13,8 @@ const dangerous = PermissionFlagsBits.Administrator | PermissionFlagsBits.Manage
 export type LevelMessage = { guildId: string; userId: string; channelId: string; messageId: string;
   at: number; content?: string | null; bot?: boolean; system?: boolean; webhookId?: string | null };
 export class LevelsService {
-  constructor(readonly repository: LevelsRepository, private readonly client: Client, private readonly notify?: GuildLogNotifier) {}
+  constructor(readonly repository: LevelsRepository, private readonly client: Client, private readonly notify?: GuildLogNotifier,
+    private readonly onAward?: (guildId: string, userId: string, level: number, messageCount: number) => Promise<void>) {}
   private async safeRole(guild: Guild, roleId: string) {
     const role = await guild.roles.fetch(roleId);
     if (!role || role.id === guild.id || role.managed || !role.editable || role.permissions.any(dangerous) ||
@@ -39,6 +40,10 @@ export class LevelsService {
     const fingerprint = content ? createHash('sha256').update(content.toLowerCase()).digest('hex').slice(0, 24) : null;
     const result = await this.repository.award({ guildId: message.guildId, userId: message.userId,
       messageId: message.messageId, at: message.at, fingerprint }, settings);
+    if (result) {
+      try { await this.onAward?.(message.guildId, message.userId, result.after, result.messageCount); }
+      catch { /* An optional achievement failure must never undo committed XP. */ }
+    }
     if (!result || result.after <= result.before || (!result.rewards.length && !settings.levelUpChannelId)) return result;
     try {
       const guild = await this.client.guilds.fetch(message.guildId);

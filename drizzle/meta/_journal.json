@@ -43,6 +43,27 @@
       "when": 1790444750192,
       "tag": "0005_bumpy_forgotten_one",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790446662105,
+      "tag": "0006_shallow_excalibur",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790446912610,
+      "tag": "0007_easy_maestro",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790462819186,
+      "tag": "0008_blue_dreadnoughts",
+      "breakpoints": true
     }
   ]
 }

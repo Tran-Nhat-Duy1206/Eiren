@@ -5,7 +5,8 @@ import { defaultReputationConfig, type ReputationConfig, type ReputationReposito
 
 export class ReputationService {
   constructor(private readonly repository: ReputationRepository, private readonly permissions: PermissionService,
-    private readonly client: Client, private readonly minAccountAgeSeconds = 3600) {}
+    private readonly client: Client, private readonly minAccountAgeSeconds = 3600,
+    private readonly onReceived?: (guildId: string, userId: string, score: number) => Promise<void>) {}
   async settings(actor: Actor) {
     await this.permissions.require(actor, 'ADMIN');
     return this.repository.settings(actor.guildId);
@@ -32,7 +33,10 @@ export class ReputationService {
     if (this.minAccountAgeSeconds > 0 && [giver, member].some(value =>
       Date.now() - value.user.createdAt.getTime() < this.minAccountAgeSeconds * 1000))
       throw new AppError('VALIDATION', 'Both accounts must be at least one hour old to grant reputation.');
-    return this.repository.grant(actor.guildId, actor.userId, receiverId, interactionId);
+    const score = await this.repository.grant(actor.guildId, actor.userId, receiverId, interactionId);
+    try { await this.onReceived?.(actor.guildId, receiverId, score); }
+    catch { /* An optional achievement failure must never undo a committed grant. */ }
+    return score;
   }
 }
 export { defaultReputationConfig };
