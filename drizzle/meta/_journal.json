@@ -15,6 +15,13 @@
       "when": 1790364854809,
       "tag": "0001_aberrant_wild_child",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790378891417,
+      "tag": "0002_complete_sasquatch",
+      "breakpoints": true
     }
   ]
 }

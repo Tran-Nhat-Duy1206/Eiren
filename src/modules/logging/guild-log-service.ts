@@ -15,11 +15,23 @@ export class GuildLogService {
   ) {}
 
   async send(guildId: string, category: LogCategory, title: string, fields: readonly LogField[] = [], metadata: LogMetadata = {}): Promise<void> {
+    let channelId: string | null | undefined;
     try {
       const settings = await this.guildConfig.get(guildId);
       // No cross-category fallback: a security/moderation log must not leak into a general channel.
-      const channelId = category === 'security' ? settings?.securityLogChannelId
+      channelId = category === 'security' ? settings?.securityLogChannelId
         : category === 'moderation' ? settings?.modLogChannelId : settings?.logChannelId;
+    } catch {
+      this.logger.warn({ guildId, category }, 'Unable to read guild settings for log delivery');
+      return;
+    }
+    await this.sendTo(guildId, channelId, category, title, fields, metadata);
+  }
+
+  /** Explicit destination for module-specific alert channels (for example anti-raid alerts). */
+  async sendTo(guildId: string, channelId: string | null | undefined, category: LogCategory,
+    title: string, fields: readonly LogField[] = [], metadata: LogMetadata = {}): Promise<void> {
+    try {
       if (!channelId) return;
       const channel = await this.client.channels.fetch(channelId);
       if (!channel || !('guildId' in channel) || channel.guildId !== guildId ||
