@@ -3,7 +3,9 @@ import { loadEnv } from '../core/config/env.js';
 import { createDatabase } from '../core/database/connection.js';
 import { guilds, moderationCases, moderatorNotes, verificationSettings, memberVerifications, antiraidSettings, joinHistory,
   roleMenus, roleMenuOptions, ticketSettings, tickets as ticketRows, ticketParticipants, reports as reportRows, appeals,
-  suggestionSettings, suggestions as suggestionRows, suggestionVotes } from '../core/database/schema.js';
+  suggestionSettings, suggestions as suggestionRows, suggestionVotes,
+  levelsSettings, memberLevels, levelRewards, levelIgnoredChannels, reputationSettings, memberReputation,
+  reputationGrants, starboardSettings, starboardMessages, starboardIgnoredChannels } from '../core/database/schema.js';
 import { createLogger } from '../core/logger/logger.js';
 import { registerCommands } from '../core/commands/dispatcher.js';
 import { registerComponents, registerSelects } from '../core/components/component.js';
@@ -35,15 +37,23 @@ import { ReportService } from '../modules/reports/service.js';
 import { SuggestionRepository } from '../modules/suggestions/repository.js';
 import { SuggestionService } from '../modules/suggestions/service.js';
 import { DiscordSuggestionGateway } from '../modules/suggestions/discord-gateway.js';
+import { LevelsRepository } from '../modules/levels/repository.js';
+import { LevelsService } from '../modules/levels/service.js';
+import { ReputationRepository } from '../modules/reputation/repository.js';
+import { ReputationService } from '../modules/reputation/service.js';
+import { StarboardRepository } from '../modules/starboard/repository.js';
+import { StarboardService } from '../modules/starboard/service.js';
+import { DiscordStarboardGateway } from '../modules/starboard/discord-gateway.js';
+import { ProfileService } from '../modules/profiles/service.js';
 
 const env = loadEnv();
 const logger = createLogger(env.LOG_LEVEL);
 const { db, pool } = createDatabase(env.DATABASE_URL);
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages,
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildModeration,
     ...(env.ENABLE_GUILD_MEMBERS_INTENT ? [GatewayIntentBits.GuildMembers] : [])],
-  partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
+  partials: [Partials.Message, Partials.Channel, Partials.GuildMember, Partials.Reaction, Partials.User],
 });
 const repository = new GuildRepository(db);
 const registry = buildRegistry(manifests);
@@ -87,8 +97,14 @@ const tickets = new TicketService(new TicketRepository(db), permissions, logger,
 const reports = new ReportService(new ReportRepository(db), permissions, notifier);
 const suggestions = new SuggestionService(new SuggestionRepository(db), permissions,
   async guildId => new DiscordSuggestionGateway(await client.guilds.fetch(guildId)), logger, { send: notifier });
+const levels = new LevelsService(new LevelsRepository(db), client, notifier);
+const reputation = new ReputationService(new ReputationRepository(db), permissions, client);
+const starboard = new StarboardService(new StarboardRepository(db), permissions,
+  async guildId => new DiscordStarboardGateway(await client.guilds.fetch(guildId)), logger);
+const profiles = new ProfileService(modules, (guildId, userId) => levels.rank(guildId, userId),
+  (guildId, userId) => reputation.score(guildId, userId));
 const services = { logger, repository, guildConfig, permissions, modules, guildLogs, moderation, verification, antiraid,
-  roles, tickets, reports, suggestions };
+  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles };
 const scheduler = new ModerationScheduler(moderation, async guildId => {
   const guild = await client.guilds.fetch(guildId);
   if (!client.user) throw new Error('Bot not logged in');
@@ -119,6 +135,16 @@ const lifecycle = createBotLifecycle({
     await db.select({ id: suggestionSettings.guildId }).from(suggestionSettings).limit(1);
     await db.select({ id: suggestionRows.id }).from(suggestionRows).limit(1);
     await db.select({ id: suggestionVotes.suggestionId }).from(suggestionVotes).limit(1);
+    await db.select({ id: levelsSettings.guildId }).from(levelsSettings).limit(1);
+    await db.select({ id: memberLevels.guildId }).from(memberLevels).limit(1);
+    await db.select({ id: levelRewards.guildId }).from(levelRewards).limit(1);
+    await db.select({ id: levelIgnoredChannels.guildId }).from(levelIgnoredChannels).limit(1);
+    await db.select({ id: reputationSettings.guildId }).from(reputationSettings).limit(1);
+    await db.select({ id: memberReputation.guildId }).from(memberReputation).limit(1);
+    await db.select({ id: reputationGrants.id }).from(reputationGrants).limit(1);
+    await db.select({ id: starboardSettings.guildId }).from(starboardSettings).limit(1);
+    await db.select({ id: starboardMessages.id }).from(starboardMessages).limit(1);
+    await db.select({ id: starboardIgnoredChannels.guildId }).from(starboardIgnoredChannels).limit(1);
   },
   register() {
     registerCommands(client, registry.commands, services);

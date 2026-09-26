@@ -1,0 +1,2 @@
+ALTER TABLE "reputation_grants" ADD COLUMN "interaction_id" text;--> statement-breakpoint
+CREATE UNIQUE INDEX "reputation_grants_guild_interaction_unique" ON "reputation_grants" USING btree ("guild_id","interaction_id");

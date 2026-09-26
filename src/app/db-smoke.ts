@@ -5,7 +5,10 @@ import { createDatabase } from '../core/database/connection.js';
 import { guilds, guildSettings, guildModules, guildPermissionRoles, moderationCases, moderatorNotes,
   verificationSettings, memberVerifications, antiraidSettings, joinHistory,
   roleMenus, roleMenuOptions, ticketSettings, tickets, ticketParticipants, reports, appeals,
-  suggestionSettings, suggestions, suggestionVotes } from '../core/database/schema.js';
+  suggestionSettings, suggestions, suggestionVotes,
+  levelsSettings, memberLevels, levelRewards, levelIgnoredChannels,
+  reputationSettings, memberReputation, reputationGrants,
+  starboardSettings, starboardMessages, starboardIgnoredChannels } from '../core/database/schema.js';
 import { createLogger } from '../core/logger/logger.js';
 
 // An opt-in integration check against the configured real PostgreSQL instance.
@@ -52,7 +55,25 @@ try {
         throw new Error('V3 smoke-test records were not readable');
       const [readVote] = await tx.select().from(suggestionVotes).where(eq(suggestionVotes.suggestionId, suggestion.id));
       if (readVote?.vote !== 1) throw new Error('V3 vote was not durable inside transaction');
-      // Constraint checks run in savepoints so both invalid writes can be attempted in one transaction.
+      const [levelSetting] = await tx.insert(levelsSettings).values({ guildId }).returning();
+      const [memberLevel] = await tx.insert(memberLevels).values({ guildId, userId: guildId, xp: 10, messageCount: 1 }).returning();
+      const [reward] = await tx.insert(levelRewards).values({ guildId, level: 1, roleId: guildId }).returning();
+      const [levelIgnored] = await tx.insert(levelIgnoredChannels).values({ guildId, channelId: guildId }).returning();
+      const [repSetting] = await tx.insert(reputationSettings).values({ guildId }).returning();
+      const [memberRep] = await tx.insert(memberReputation).values({ guildId, userId: guildId, score: 1 }).returning();
+      const [grant] = await tx.insert(reputationGrants).values({ guildId, giverId: guildId, receiverId: `${guildId}1` }).returning();
+      const [starSetting] = await tx.insert(starboardSettings).values({ guildId }).returning();
+      const [starMessage] = await tx.insert(starboardMessages).values({ guildId, sourceChannelId: guildId,
+        sourceMessageId: guildId, sourceAuthorId: guildId, starCount: 1 }).returning();
+      const [starIgnored] = await tx.insert(starboardIgnoredChannels).values({ guildId, channelId: guildId }).returning();
+      if (!levelSetting || !memberLevel || !reward || !levelIgnored || !repSetting || !memberRep || !grant
+        || !starSetting || !starMessage || !starIgnored)
+        throw new Error('V4 smoke-test records were not readable');
+      const [readLevel] = await tx.select().from(memberLevels).where(eq(memberLevels.guildId, guildId));
+      const [readStar] = await tx.select().from(starboardMessages).where(eq(starboardMessages.guildId, guildId));
+      if (readLevel?.xp !== 10 || readStar?.starCount !== 1)
+        throw new Error('V4 records were not durable inside transaction');
+      // Constraint checks run in savepoints so invalid writes can be attempted in one transaction.
       const rejected = async (work: (inner: typeof tx) => Promise<unknown>) => {
         try { await tx.transaction(work); return false; }
         catch { return true; }
@@ -71,6 +92,25 @@ try {
       if (!await rejected(inner => inner.insert(suggestionVotes).values({ suggestionId: suggestion.id, userId: guildId, vote: 0 })
         .onConflictDoUpdate({ target: [suggestionVotes.suggestionId, suggestionVotes.userId], set: { vote: 0 } })))
         throw new Error('Suggestion vote value constraint failed');
+      if (!await rejected(inner => inner.insert(levelsSettings).values({ guildId: `${guildId}9` })))
+        throw new Error('V4 guild foreign-key constraint failed');
+      if (!await rejected(inner => inner.insert(memberLevels).values({ guildId, userId: guildId })))
+        throw new Error('Member levels uniqueness constraint failed');
+      if (!await rejected(inner => inner.insert(levelRewards).values({ guildId, level: 0, roleId: `${guildId}2` })))
+        throw new Error('Level reward range constraint failed');
+      if (!await rejected(inner => inner.insert(reputationGrants).values({ guildId, giverId: guildId, receiverId: guildId })))
+        throw new Error('Reputation self-grant constraint failed');
+      await tx.insert(reputationGrants).values({ guildId, giverId: guildId, receiverId: `${guildId}2`, interactionId: 'smoke-interaction' });
+      if (!await rejected(inner => inner.insert(reputationGrants).values({ guildId, giverId: guildId, receiverId: `${guildId}3`, interactionId: 'smoke-interaction' })))
+        throw new Error('Reputation interaction uniqueness constraint failed');
+      if (!await rejected(inner => inner.insert(memberReputation).values({ guildId, userId: `${guildId}2`, score: -1 })))
+        throw new Error('Member reputation score constraint failed');
+      if (!await rejected(inner => inner.insert(starboardMessages).values({ guildId, sourceChannelId: guildId,
+        sourceMessageId: guildId, sourceAuthorId: guildId })))
+        throw new Error('Starboard source uniqueness constraint failed');
+      if (!await rejected(inner => inner.insert(starboardMessages).values({ guildId, sourceChannelId: guildId,
+        sourceMessageId: `${guildId}2`, sourceAuthorId: guildId, status: 'INVALID' })))
+        throw new Error('Starboard status constraint failed');
       throw rollback;
     });
     throw new Error('Smoke-test transaction did not roll back');
@@ -79,7 +119,10 @@ try {
   }
   const [persisted] = await db.select().from(guilds).where(eq(guilds.id, guildId));
   if (persisted) throw new Error('Smoke-test transaction persisted unexpectedly');
-  logger.info('PostgreSQL V0/V1/V2/V3 schema, constraints and rollback smoke test passed');
+  const [persistedLevel] = await db.select().from(memberLevels).where(eq(memberLevels.guildId, guildId));
+  const [persistedStar] = await db.select().from(starboardMessages).where(eq(starboardMessages.guildId, guildId));
+  if (persistedLevel || persistedStar) throw new Error('V4 smoke-test records persisted unexpectedly');
+  logger.info('PostgreSQL V0/V1/V2/V3/V4 schema, constraints and rollback smoke test passed');
 } catch (error) {
   // Database driver exceptions can contain credentials; only emit the error class.
   logger.error({ errorType: error instanceof Error ? error.name : 'unknown' }, 'PostgreSQL smoke test failed');
