@@ -57,7 +57,7 @@ describe('giveaways', () => {
     const row = { id: 20, guildId: 'g', status: 'ACTIVE', messageId: 'posted' };
     const repository = { due: vi.fn(async () => []), pendingDrawNotices: vi.fn(async () => []), missingPosts: vi.fn(async () => []),
       refreshCandidates: vi.fn(async () => [row]), entryCount: vi.fn(async () => 7), markRefreshAttempt: vi.fn(async () => {}) } as unknown as GiveawayRepository;
-    const gateway = { refresh: vi.fn().mockRejectedValueOnce(new Error('transient')).mockResolvedValueOnce(undefined) };
+    const gateway = { refresh: vi.fn().mockRejectedValueOnce(new Error('transient')).mockResolvedValueOnce(undefined), isMissingMessage: vi.fn(() => false) };
     const service = new GiveawayService(repository, {} as PermissionService,
       { isEnabled: vi.fn(async () => true) } as unknown as ModuleService,
       async () => gateway as never, { warn: vi.fn() } as unknown as Logger);
@@ -65,6 +65,53 @@ describe('giveaways', () => {
     expect(gateway.refresh).toHaveBeenCalledTimes(2);
     expect(gateway.refresh).toHaveBeenNthCalledWith(2, row, 7);
     expect(repository.markRefreshAttempt).toHaveBeenCalledTimes(2);
+  });
+  it('claims a deleted active post and rejects old buttons after replacement', async () => {
+    const row = { id: 21, guildId: 'g', channelId: 'c', status: 'ACTIVE', messageId: 'deleted', endAt: new Date(Date.now() + 60000) };
+    const missing = Object.assign(new Error('Unknown Message'), { code: 10008 });
+    let current = { ...row };
+    const repository = { due: vi.fn(async () => []), pendingDrawNotices: vi.fn(async () => []),
+      missingPosts: vi.fn(async () => current.messageId === null ? [current] : []),
+      refreshCandidates: vi.fn(async () => current.messageId === 'deleted' ? [current] : []),
+      markRefreshAttempt: vi.fn(async () => {}), entryCount: vi.fn(async () => 0),
+      markMissing: vi.fn(async (_g, _id, id) => { if (current.messageId !== id) return false; current = { ...current, messageId: null as never }; return true; }),
+      claimPost: vi.fn(async () => { if (current.messageId !== null) return null; current = { ...current, messageId: 'PENDING:claim' }; return 'PENDING:claim'; }),
+      finishPost: vi.fn(async (_g, _id, token, id) => { if (current.messageId !== token) return null; current = { ...current, messageId: id }; return current; }),
+      releasePost: vi.fn(async () => {}), get: vi.fn(async () => current), draws: vi.fn(async () => []) } as unknown as GiveawayRepository;
+    const gateway = { refresh: vi.fn(async () => { throw missing; }), isMissingMessage: vi.fn((error: unknown) => error === missing),
+      post: vi.fn(async () => 'replacement'), remove: vi.fn(async () => {}) };
+    const service = new GiveawayService(repository, {} as PermissionService, { isEnabled: vi.fn(async () => true) } as unknown as ModuleService,
+      async () => gateway as never, { warn: vi.fn() } as unknown as Logger);
+    await service.runDue();
+    expect(repository.markMissing).toHaveBeenCalledWith('g', 21, 'deleted');
+    await service.runDue();
+    expect(gateway.post).toHaveBeenCalledTimes(1);
+    expect(current.messageId).toBe('replacement');
+    await expect(service.entry('g', 21, 'u', 'enter', 'c', 'deleted', false)).rejects.toThrow('stale');
+  });
+  it('removes a known original post when its initial database attachment fails', async () => {
+    const actor = { guildId: 'g', userId: 'moderator', guildOwnerId: 'moderator', roleIds: [] };
+    const row = { id: 23, guildId: 'g', channelId: 'c', status: 'ACTIVE', messageId: null };
+    const repository = { create: vi.fn(async () => row), entryCount: vi.fn(async () => 0),
+      attach: vi.fn(async () => { throw new Error('PostgreSQL unavailable after send'); }) } as unknown as GiveawayRepository;
+    const gateway = { validateChannel: vi.fn(async () => {}), post: vi.fn(async () => 'known-orphan'), remove: vi.fn(async () => {}) };
+    const service = new GiveawayService(repository, { require: vi.fn(async () => {}) } as unknown as PermissionService,
+      { isEnabled: vi.fn(async () => true) } as unknown as ModuleService,
+      async () => gateway as never, { warn: vi.fn() } as unknown as Logger);
+    const result = await service.create(actor, { channelId: 'c', prize: 'P', endAt: new Date(Date.now() + 60_000), winnerCount: 1 });
+    expect(result.posted).toBe(false);
+    expect(gateway.remove).toHaveBeenCalledExactlyOnceWith('c', 'known-orphan');
+  });
+  it('cleans an orphan when cancellation wins attachment', async () => {
+    const row = { id: 22, guildId: 'g', channelId: 'c', status: 'ACTIVE', messageId: null };
+    const repository = { due: vi.fn(async () => []), pendingDrawNotices: vi.fn(async () => []), missingPosts: vi.fn(async () => [row]),
+      refreshCandidates: vi.fn(async () => []), claimPost: vi.fn(async () => 'PENDING:lease'), entryCount: vi.fn(async () => 0),
+      finishPost: vi.fn(async () => null) } as unknown as GiveawayRepository;
+    const gateway = { post: vi.fn(async () => 'orphan'), remove: vi.fn(async () => {}) };
+    const service = new GiveawayService(repository, {} as PermissionService, { isEnabled: vi.fn(async () => true) } as unknown as ModuleService,
+      async () => gateway as never, { warn: vi.fn() } as unknown as Logger);
+    await service.runDue();
+    expect(gateway.remove).toHaveBeenCalledWith('c', 'orphan');
   });
   it('draws distinct winners without exceeding the available pool', () => {
     for (let i = 0; i < 100; i++) {

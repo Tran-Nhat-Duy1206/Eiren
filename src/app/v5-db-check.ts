@@ -84,6 +84,18 @@ try {
     winnerCount: 1, requireVerified: true, minLevel: 5 });
   assert('giveawayEligibilityPersisted', (await giveaway2.get(guildId, prize.id))?.minLevel === 5 &&
     (await giveaway2.get(guildId, prize.id))?.requireVerified === true);
+  const deletedPost = await giveaway.create({ guildId, creatorId: 'organizer', channelId: 'channel', messageId: 'deleted-post',
+    prize: 'Deleted announcement', startAt: now, endAt: new Date(now.getTime() + 3600_000), winnerCount: 1 });
+  const missing = await Promise.all([giveaway.markMissing(guildId, deletedPost.id, 'deleted-post'),
+    giveaway2.markMissing(guildId, deletedPost.id, 'deleted-post')]);
+  const postClaims = await Promise.all([giveaway.claimPost(guildId, deletedPost.id), giveaway2.claimPost(guildId, deletedPost.id)]);
+  const postClaim = postClaims.find(Boolean)!;
+  assert('giveawayDeletedPostSingleClaim', missing.filter(Boolean).length === 1 && postClaims.filter(Boolean).length === 1 &&
+    (await giveaway2.get(guildId, deletedPost.id))?.messageId === postClaim &&
+    !await giveaway.finishPost(guildId, deletedPost.id, 'stale-claim', 'wrong-post'));
+  assert('giveawayDeletedPostReplacement', !!await giveaway2.finishPost(guildId, deletedPost.id, postClaim, 'replacement-post') &&
+    !await giveaway.entry(deletedPost.id, 'stale', 'enter', 'channel', 'deleted-post') &&
+    await giveaway2.entry(deletedPost.id, 'new', 'enter', 'channel', 'replacement-post') === true);
   const [first, second] = await Promise.all([giveaway.entry(prize.id, 'qualified', 'enter', 'channel', 'posted'),
     giveaway2.entry(prize.id, 'qualified', 'enter', 'channel', 'posted')]);
   assert('giveawayEntryConcurrentUnique', [first, second].filter(Boolean).length === 1 && await giveaway.entryCount(prize.id) === 1);
@@ -119,6 +131,9 @@ try {
   assert('giveawayRerollNoticeRetry', !!rerollClaim && !!retried &&
     await giveaway2.finishDrawNotice(rerollDraw.id, retried, 'reroll-result') &&
     (await giveaway.pendingDrawNotices(10)).length === 0);
+  const finalReroll = await giveaway.draw(guildId, prize.id, 'REROLL', entrants, eligible, pick, drawAt);
+  assert('giveawayRepeatedRerollCreatesHistory', finalReroll.state === 'DRAWN' && finalReroll.winners?.length === 0 &&
+    (await giveaway.draws(prize.id)).length === 3 && (await giveaway.winners(prize.id)).length === 2);
   stage = 'tempvoice';
   await db.insert(tempvoiceSettings).values({ guildId, enabled: true, lobbyChannelId: 'lobby' });
   const reservations = await Promise.all([voice.reserve(guildId, 'owner'), voice2.reserve(guildId, 'owner')]);
@@ -136,6 +151,22 @@ try {
   assert('tempvoiceCleanupIdempotent', await voice.cleanup(room.id, row => row.status === 'ACTIVE' && !!row.emptySince,
     async () => true) && !await voice2.cleanup(room.id, row => row.status === 'ACTIVE', async () => true) &&
     !(await voice.byOwner(guildId, 'new-owner')));
+  const occupiedReservation = await voice.reserve(guildId, 'rejoined-owner');
+  await voice.attach(occupiedReservation.row.id, 'rejoined-room'); await voice.activate(occupiedReservation.row.id);
+  await db.update(tempvoiceRooms).set({ status: 'DELETING', emptySince: new Date(0) })
+    .where(eq(tempvoiceRooms.id, occupiedReservation.row.id));
+  const deferredDelete = await voice2.cleanup(occupiedReservation.row.id, row => row.status === 'DELETING', async () => 'occupied');
+  const recoveredOwner = await voice.byOwner(guildId, 'rejoined-owner');
+  assert('tempvoiceOccupiedCleanupRestoresOwner', !deferredDelete && recoveredOwner?.status === 'ACTIVE' &&
+    recoveredOwner.emptySince === null && recoveredOwner.channelId === 'rejoined-room');
+  const queueNow = new Date(); const oldQueueTime = new Date(queueNow.getTime() - 120_000);
+  await db.insert(tempvoiceRooms).values(Array.from({ length: 25 }, (_, index) => ({ guildId,
+    ownerId: `queued-owner-${index}`, status: 'CREATING', createdAt: oldQueueTime, updatedAt: oldQueueTime })));
+  const queueFirst = await voice.outstandingDue(queueNow, 60_000);
+  for (const item of queueFirst) await voice.deferUnresolved(item.id, queueNow);
+  const queueSecond = await voice2.outstandingDue(queueNow, 60_000);
+  assert('tempvoiceBoundedFairDueQueue', queueFirst.length === 20 && queueSecond.length === 5 &&
+    queueSecond.every(item => !queueFirst.some(previous => previous.id === item.id)));
   stage = 'achievements';
   const modules = { isEnabled: async (_guild: string, key: string) => key === 'achievements' || key === 'levels' };
   const achievements = new AchievementsService(achievement, modules);

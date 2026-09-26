@@ -1,3 +1,4 @@
+import { DiscordAPIError } from 'discord.js';
 import { AppError } from '../../core/errors/errors.js';
 import type { Logger } from '../../core/logger/logger.js';
 import type { Actor, PermissionService } from '../../core/permissions/permission-service.js';
@@ -33,9 +34,11 @@ export class TempvoiceService {
       return;
     }
     let channelId: string | undefined;
+    let creating = false;
     let moved = false;
     try {
       await gateway.validate(lobbyId, settings.categoryId);
+      creating = true;
       channelId = await gateway.create(settings.categoryId, ownerId, row.id, roomName(`Room ${ownerId}`), roomLimit(settings.userLimit), settings.defaultPrivate);
       const attached = await this.repository.attach(row.id, channelId);
       if (!attached) throw new AppError('CONFLICT', 'Voice room reservation changed.');
@@ -52,6 +55,11 @@ export class TempvoiceService {
           if ((await gateway.occupants(channelId)).length) { this.logger.error({ guildId, roomId: row.id, channelId }, 'Occupied room requires reconciliation'); }
           else { await gateway.delete(channelId); await this.repository.close(row.id); }
         } catch { this.logger.error({ guildId, roomId: row.id, channelId }, 'Temporary voice orphan requires reconciliation'); }
+      } else if (!creating || error instanceof DiscordAPIError && error.status >= 400 && error.status < 500 && error.status !== 429) {
+        // No create request was made, or Discord definitively rejected it.
+        // Rate limits and transport/server failures during create have uncertain outcomes.
+        try { await this.repository.close(row.id); }
+        catch { this.logger.error({ guildId, roomId: row.id }, 'Failed to release rejected room reservation'); }
       } else {
         // A Discord create may succeed but its response fail; retain the reservation until marker recovery.
         this.logger.error({ guildId, roomId: row.id }, 'Creation outcome unknown; marker reconciliation required');
@@ -116,6 +124,7 @@ export class TempvoiceService {
       const matches = await gateway.findReservation(row.id, row.ownerId);
       if (matches.length !== 1) {
         this.logger.error({ guildId: row.guildId, roomId: row.id, matchCount: matches.length }, 'Unresolved room reservation requires manual reconciliation');
+        await this.repository.deferUnresolved(row.id, now);
         return;
       }
       if (!await this.repository.attach(row.id, matches[0]!)) return;
@@ -138,7 +147,7 @@ export class TempvoiceService {
   }
   async runDue(now = new Date()) {
     for (const room of await this.repository.pending(now, EMPTY_GRACE_MS)) await this.reconcile(room, now);
-    for (const room of await this.repository.outstanding()) if (room.status === 'DELETING' || room.status === 'CREATING' && room.createdAt.getTime() <= now.getTime() - EMPTY_GRACE_MS) await this.reconcile(room, now);
+    for (const room of await this.repository.outstandingDue(now, EMPTY_GRACE_MS)) await this.reconcile(room, now);
   }
   async reconcileActive(now = new Date()) {
     for (const row of await this.repository.outstanding()) {

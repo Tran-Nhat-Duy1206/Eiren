@@ -29,15 +29,37 @@ export class GiveawayRepository {
   async pendingAnnouncements(limit: number) { return this.db.select().from(giveaways).where(and(eq(giveaways.status, 'ENDED'),
     sql`(${giveaways.resultAnnouncementId} is null or ${giveaways.resultAnnouncementId} like 'PENDING:%')`))
     .orderBy(giveaways.endAt, giveaways.id).limit(limit); }
+  /** A conditional lease keeps concurrent schedulers from posting the same missing announcement. */
+  async claimPost(guildId: string, id: number, now = new Date()) {
+    const token = `PENDING:${now.getTime()}:${randomUUID()}`;
+    const [row] = await this.db.update(giveaways).set({ messageId: token, updatedAt: now })
+      .where(and(eq(giveaways.guildId, guildId), eq(giveaways.id, id), eq(giveaways.status, 'ACTIVE'),
+        sql`(${giveaways.messageId} is null or (${giveaways.messageId} like 'PENDING:%' and ${giveaways.updatedAt} < ${new Date(now.getTime() - 300000)}))`)).returning();
+    return row ? token : null;
+  }
+  async finishPost(guildId: string, id: number, token: string, messageId: string) {
+    const [row] = await this.db.update(giveaways).set({ messageId, updatedAt: new Date() })
+      .where(and(eq(giveaways.guildId, guildId), eq(giveaways.id, id), eq(giveaways.status, 'ACTIVE'), eq(giveaways.messageId, token))).returning();
+    return row ?? null;
+  }
+  async releasePost(guildId: string, id: number, token: string) {
+    await this.db.update(giveaways).set({ messageId: null, updatedAt: new Date() })
+      .where(and(eq(giveaways.guildId, guildId), eq(giveaways.id, id), eq(giveaways.messageId, token)));
+  }
+  async markMissing(guildId: string, id: number, messageId: string) {
+    const [row] = await this.db.update(giveaways).set({ messageId: null, updatedAt: new Date() })
+      .where(and(eq(giveaways.guildId, guildId), eq(giveaways.id, id), eq(giveaways.status, 'ACTIVE'), eq(giveaways.messageId, messageId))).returning();
+    return !!row;
+  }
   async missingPosts(limit: number) { return this.db.select({ giveaway: giveaways }).from(giveaways)
     .innerJoin(guildModules, and(eq(guildModules.guildId, giveaways.guildId), eq(guildModules.moduleKey, 'giveaways'), eq(guildModules.enabled, true)))
-    .where(and(eq(giveaways.status, 'ACTIVE'), sql`${giveaways.messageId} is null`))
+    .where(and(eq(giveaways.status, 'ACTIVE'), sql`(${giveaways.messageId} is null or (${giveaways.messageId} like 'PENDING:%' and ${giveaways.updatedAt} < ${new Date(Date.now() - 300000)}))`))
     .orderBy(giveaways.endAt, giveaways.id).limit(limit).then(rows => rows.map(row => row.giveaway)); }
   async refreshCandidates(limit: number) { return this.db.select({ giveaway: giveaways }).from(giveaways)
     .innerJoin(guildModules, and(eq(guildModules.guildId, giveaways.guildId), eq(guildModules.moduleKey, 'giveaways'), eq(guildModules.enabled, true)))
-    .where(sql`${giveaways.messageId} is not null`).orderBy(giveaways.updatedAt, giveaways.id).limit(limit)
+    .where(sql`${giveaways.messageId} is not null and ${giveaways.messageId} not like 'PENDING:%'`).orderBy(giveaways.updatedAt, giveaways.id).limit(limit)
     .then(rows => rows.map(row => row.giveaway)); }
-  async markRefreshAttempt(id: number) { await this.db.update(giveaways).set({ updatedAt: new Date() }).where(eq(giveaways.id, id)); }
+  async markRefreshAttempt(id: number, messageId: string) { await this.db.update(giveaways).set({ updatedAt: new Date() }).where(and(eq(giveaways.id, id), eq(giveaways.messageId, messageId))); }
   async entry(id: number, userId: string, action: 'enter' | 'leave', channelId: string, messageId: string) {
     return this.db.transaction(async tx => {
       const [giveaway] = await tx.select().from(giveaways).where(eq(giveaways.id, id)).for('update');

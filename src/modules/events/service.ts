@@ -5,9 +5,15 @@ import type { EventInput, EventRepository, CommunityEvent } from './repository.j
 import type { EventGateway } from './discord-gateway.js';
 
 export function parseEventTime(input: string) {
-  if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d{1,3})?)?(?:Z|[+-](?:0\d|1[0-4]):[0-5]\d)$/.test(input)) throw new AppError('VALIDATION', 'Use ISO time with explicit Z or timezone offset.');
+  const match = /^(\d{4}-\d\d-\d\dT\d\d:\d\d)(?::(\d\d)(?:\.\d{1,3})?)?(Z|([+-])(0\d|1[0-4]):([0-5]\d))$/.exec(input);
+  if (!match) throw new AppError('VALIDATION', 'Use ISO time with explicit Z or timezone offset.');
+  const [, minute, seconds, zone, sign, hours, minutes] = match;
+  const offset = zone === 'Z' ? 0 : (sign === '+' ? 1 : -1) * (Number(hours) * 60 + Number(minutes));
+  if (Math.abs(offset) > 14 * 60) throw new AppError('VALIDATION', 'Invalid ISO time.');
   const date = new Date(input);
-  if (!Number.isFinite(date.getTime())) throw new AppError('VALIDATION', 'Invalid ISO time.');
+  if (!Number.isFinite(date.getTime()) ||
+      new Date(date.getTime() + offset * 60_000).toISOString().slice(0, 19) !== `${minute}:${seconds ?? '00'}`)
+    throw new AppError('VALIDATION', 'Invalid ISO time.');
   return date;
 }
 export type EventHooks = { onJoined?(guildId: string, userId: string): Promise<void>; onAttended?(guildId: string, userId: string): Promise<void> };

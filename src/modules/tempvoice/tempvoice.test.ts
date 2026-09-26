@@ -9,7 +9,7 @@ const lobby = '123456789012345670';
 const channel = '123456789012345671';
 function fixture() {
   const room = { id: 1, guildId: actor.guildId, ownerId: actor.userId, channelId: channel, status: 'ACTIVE', emptySince: new Date(0), createdAt: new Date(0), updatedAt: new Date(0) };
-  const repo = { settings: vi.fn().mockResolvedValue({ enabled: true, lobbyChannelId: lobby, categoryId: '123456789012345672', userLimit: 0, defaultPrivate: true }), reserve: vi.fn().mockResolvedValue({ row: room, created: false }), markEmpty: vi.fn(), attach: vi.fn(), rejoin: vi.fn(async (_guild, _owner, _channel, callback) => { await callback(); return true; }), byChannel: vi.fn().mockResolvedValue(room), withActive: vi.fn(async (_guild, _channel, owner, callback) => { if (owner !== room.ownerId) throw new AppError('PERMISSION', 'Not owner'); return callback(room); }), pending: vi.fn().mockResolvedValue([room]), outstanding: vi.fn().mockResolvedValue([]), activate: vi.fn(), close: vi.fn(), transfer: vi.fn(async (_guild, _channel, _owner, _target, apply) => { await apply(room); return room; }), cleanup: vi.fn(async (_id, eligible, remove) => { if (eligible(room)) return remove(room); return false; }) };
+  const repo = { settings: vi.fn().mockResolvedValue({ enabled: true, lobbyChannelId: lobby, categoryId: '123456789012345672', userLimit: 0, defaultPrivate: true }), reserve: vi.fn().mockResolvedValue({ row: room, created: false }), markEmpty: vi.fn(), attach: vi.fn(), rejoin: vi.fn(async (_guild, _owner, _channel, callback) => { await callback(); return true; }), byChannel: vi.fn().mockResolvedValue(room), withActive: vi.fn(async (_guild, _channel, owner, callback) => { if (owner !== room.ownerId) throw new AppError('PERMISSION', 'Not owner'); return callback(room); }), pending: vi.fn().mockResolvedValue([room]), outstanding: vi.fn().mockResolvedValue([]), outstandingDue: vi.fn().mockResolvedValue([]), deferUnresolved: vi.fn(), activate: vi.fn(), close: vi.fn(), transfer: vi.fn(async (_guild, _channel, _owner, _target, apply) => { await apply(room); return room; }), cleanup: vi.fn(async (_id, eligible, remove) => { if (eligible(room)) return remove(room); return false; }) };
   const gateway = { inChannel: vi.fn().mockResolvedValue(true), exists: vi.fn().mockResolvedValue(true), occupants: vi.fn().mockResolvedValue([]), move: vi.fn(), delete: vi.fn(), rename: vi.fn(), limit: vi.fn(), lock: vi.fn(), kick: vi.fn(), access: vi.fn(), transfer: vi.fn().mockResolvedValue(vi.fn()), member: vi.fn().mockResolvedValue(true), humanMember: vi.fn().mockResolvedValue(true), seal: vi.fn().mockResolvedValue(vi.fn()), findReservation: vi.fn().mockResolvedValue([]), validate: vi.fn(), create: vi.fn(), };
   const service = new TempvoiceService(repo as never, { require: vi.fn() } as never, { error: vi.fn() } as never, async () => gateway as never);
   return { service, repo, gateway, room };
@@ -101,7 +101,7 @@ describe('temporary voice invariants', () => {
   it('recovers a channel created before reservation attachment using its marker', async () => {
     const { service, repo, gateway, room } = fixture();
     room.status = 'CREATING'; room.channelId = null as never;
-    repo.outstanding.mockResolvedValue([room]); repo.pending.mockResolvedValue([]);
+    repo.outstandingDue.mockResolvedValue([room]); repo.pending.mockResolvedValue([]);
     gateway.findReservation.mockResolvedValue([channel]); repo.attach = vi.fn().mockResolvedValue({ ...room, channelId: channel });
     await service.runDue(new Date(EMPTY_GRACE_MS + 1));
     expect(repo.attach).toHaveBeenCalledWith(room.id, channel);
@@ -110,7 +110,7 @@ describe('temporary voice invariants', () => {
   it('retains unresolved CREATING reservation after category reconfiguration or unknown create outcome', async () => {
     const { service, repo, gateway, room } = fixture();
     room.status = 'CREATING'; room.channelId = null as never;
-    repo.outstanding.mockResolvedValue([room]); repo.pending.mockResolvedValue([]);
+    repo.outstandingDue.mockResolvedValue([room]); repo.pending.mockResolvedValue([]);
     repo.settings.mockResolvedValue({ categoryId: 'different-category' });
     gateway.findReservation.mockResolvedValue([]);
     await service.runDue(new Date(EMPTY_GRACE_MS + 1));
@@ -118,6 +118,35 @@ describe('temporary voice invariants', () => {
     expect(repo.attach).not.toHaveBeenCalled();
     expect(repo.cleanup).not.toHaveBeenCalled();
     expect(repo.close).not.toHaveBeenCalled();
+    expect(repo.deferUnresolved).toHaveBeenCalledWith(room.id, new Date(EMPTY_GRACE_MS + 1));
+  });
+  it('bounds each due tick and leaves unresolved reservations queued behind older work', async () => {
+    const { service, repo, room } = fixture();
+    repo.pending.mockResolvedValue([]);
+    repo.outstandingDue.mockResolvedValue([room]);
+    await service.runDue(new Date(EMPTY_GRACE_MS + 1));
+    expect(repo.pending).toHaveBeenCalledWith(new Date(EMPTY_GRACE_MS + 1), EMPTY_GRACE_MS);
+    expect(repo.outstandingDue).toHaveBeenCalledWith(new Date(EMPTY_GRACE_MS + 1), EMPTY_GRACE_MS);
+    expect(repo.outstanding).not.toHaveBeenCalled();
+  });
+  it('releases a reservation on definitive Discord create rejection but retains ambiguous failures', async () => {
+    const { service, repo, gateway, room } = fixture();
+    repo.reserve.mockResolvedValue({ row: { ...room, status: 'CREATING', channelId: null }, created: true });
+    const denied = new DiscordAPIError({ code: 50013, message: 'Missing Permissions' }, 50013, 403, 'POST', '/guilds/1/channels', {});
+    gateway.create.mockRejectedValueOnce(denied).mockRejectedValueOnce(new Error('transport timed out'));
+    await expect(service.joinedLobby(actor.guildId, actor.userId, lobby)).rejects.toBe(denied);
+    expect(repo.close).toHaveBeenCalledWith(room.id);
+    repo.close.mockClear();
+    await expect(service.joinedLobby(actor.guildId, actor.userId, lobby)).rejects.toThrow('transport timed out');
+    expect(repo.close).not.toHaveBeenCalled();
+  });
+  it('releases a reservation when pre-create validation fails', async () => {
+    const { service, repo, gateway, room } = fixture();
+    repo.reserve.mockResolvedValue({ row: { ...room, status: 'CREATING', channelId: null }, created: true });
+    gateway.validate.mockRejectedValue(new AppError('PERMISSION', 'Missing bot permissions'));
+    await expect(service.joinedLobby(actor.guildId, actor.userId, lobby)).rejects.toThrow('Missing bot permissions');
+    expect(repo.close).toHaveBeenCalledWith(room.id);
+    expect(gateway.create).not.toHaveBeenCalled();
   });
   it('retains a room when activation fails after the owner has moved', async () => {
     const { service, repo, gateway, room } = fixture();
@@ -136,6 +165,42 @@ describe('temporary voice invariants', () => {
     expect(await discord.exists(channel)).toBe(false);
     await expect(discord.delete(channel)).resolves.toBeUndefined();
     await expect(discord.occupants(channel)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+  it('counts human voice states without bulk member fetching, ignoring bots', async () => {
+    const human = '123456789012345673';
+    const bot = '123456789012345674';
+    const fetch = vi.fn();
+    const guild = { id: actor.guildId, available: true, client: { isReady: () => true },
+      channels: { fetch: vi.fn().mockResolvedValue({ guildId: actor.guildId, type: ChannelType.GuildVoice }) },
+      voiceStates: { cache: new Map([[human, { id: human, channelId: channel, member: { user: { bot: false } } }],
+        [bot, { id: bot, channelId: channel, member: { user: { bot: true } } }],
+        [actor.userId, { id: actor.userId, channelId: lobby, member: { user: { bot: false } } }]]) },
+      members: { cache: new Map(), fetch } };
+    expect(await new DiscordTempvoiceGateway(guild as never).occupants(channel)).toEqual([human]);
+    expect(fetch).not.toHaveBeenCalled();
+    guild.voiceStates.cache.set(human, { id: human, channelId: lobby, member: { user: { bot: false } } });
+    expect(await new DiscordTempvoiceGateway(guild as never).occupants(channel)).toEqual([]);
+  });
+  it('fetches only missing occupant identities and fails closed on errors or startup gaps', async () => {
+    const unknown = '123456789012345673';
+    const fetch = vi.fn().mockResolvedValue({ user: { bot: false } });
+    const guild = { id: actor.guildId, available: true, client: { isReady: () => true },
+      channels: { fetch: vi.fn().mockResolvedValue({ guildId: actor.guildId, type: ChannelType.GuildVoice }) },
+      voiceStates: { cache: new Map([[unknown, { id: unknown, channelId: channel, member: null }]]) },
+      members: { cache: new Map(), fetch } };
+    const gateway = new DiscordTempvoiceGateway(guild as never);
+    expect(await gateway.occupants(channel)).toEqual([unknown]);
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(unknown);
+    fetch.mockRejectedValueOnce(new Error('Discord member API unavailable'));
+    await expect(gateway.occupants(channel)).rejects.toThrow('Discord member API unavailable');
+    fetch.mockResolvedValueOnce(null);
+    await expect(gateway.occupants(channel)).rejects.toMatchObject({ code: 'CONFLICT' });
+    guild.client.isReady = () => false;
+    await expect(gateway.occupants(channel)).rejects.toMatchObject({ code: 'CONFLICT' });
+    guild.client.isReady = () => true;
+    guild.available = false;
+    await expect(gateway.occupants(channel)).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
   it('locks and unlocks Connect without exposing private ViewChannel', async () => {
     const edit = vi.fn();

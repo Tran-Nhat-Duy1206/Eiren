@@ -33,6 +33,13 @@ describe('community events', () => {
     expect(payload.allowedMentions).toEqual({ parse: [] });
     expect(JSON.stringify(payload)).not.toContain('allowedMentions: everyone');
   });
+  it('rejects normalized calendar dates and invalid timezones without rejecting leap days', () => {
+    expect(parseEventTime('2032-02-29T10:00Z').toISOString()).toBe('2032-02-29T10:00:00.000Z');
+    expect(parseEventTime('2032-02-29T10:00:30+05:30').toISOString()).toBe('2032-02-29T04:30:30.000Z');
+    for (const input of ['2030-02-30T10:00:00Z', '2030-02-29T10:00Z', '2030-04-31T10:00+02:00',
+      '2030-01-01T24:00Z', '2030-01-01T10:00:60Z', '2030-01-01T10:00:00+14:01'])
+      expect(() => parseEventTime(input), input).toThrow();
+  });
   it('calls hooks only after successful changed writes and excludes bots', async () => {
     const { service, repository, hooks } = setup();
     await expect(service.join('g', 2, 'bot', true)).rejects.toThrow();

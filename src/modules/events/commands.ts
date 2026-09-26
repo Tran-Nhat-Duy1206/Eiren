@@ -4,6 +4,25 @@ import { AppError } from '../../core/errors/errors.js';
 import { parseEventTime } from './service.js';
 import type { Actor } from '../../core/permissions/permission-service.js';
 import type { Services } from '../../app/services.js';
+import type { CommunityEvent } from './repository.js';
+
+export function eventListContent(rows: readonly CommunityEvent[]) {
+  if (!rows.length) return 'No events found.';
+  // Twenty records must fit in one Discord reply even when titles are maximal.
+  return rows.map(row => {
+    const clean = row.title.replace(/\s+/g, ' ').trim();
+    const title = clean.length > 32 ? `${clean.slice(0, 31)}…` : clean;
+    return `#${row.id} ${title} · ${row.status} · <t:${Math.floor(row.startAt.getTime() / 1000)}:f>`;
+  }).join('\n');
+}
+
+export function eventViewContent(row: CommunityEvent, participants: number) {
+  const header = `Event #${row.id} · ${row.status}: ${row.title}\nStarts <t:${Math.floor(row.startAt.getTime() / 1000)}:F> · ${participants}${row.maxParticipants ? `/${row.maxParticipants}` : ''} attending${row.endAt ? `\nEnds <t:${Math.floor(row.endAt.getTime() / 1000)}:F>` : ''}\n`;
+  const description = row.description || '';
+  const budget = 2000 - header.length;
+  if (budget < 1) throw new AppError('VALIDATION', 'Event summary exceeds Discord message limits.');
+  return header + (description.length > budget ? `${description.slice(0, budget - 1)}…` : description);
+}
 
 export const eventCommands: Command[] = [{
   data: new SlashCommandBuilder().setName('event').setDescription('Community events')
@@ -40,10 +59,10 @@ export const eventCommands: Command[] = [{
     let message: string;
     if (sub === 'view') {
       const { row, participants } = await services.events.view(guildId, id);
-      message = `Event #${id} · ${row.status}: ${row.title}\nStarts <t:${Math.floor(row.startAt.getTime() / 1000)}:F> · ${participants}${row.maxParticipants ? `/${row.maxParticipants}` : ''} attending${row.endAt ? `\nEnds <t:${Math.floor(row.endAt.getTime() / 1000)}:F>` : ''}\n${row.description || ''}`;
+      message = eventViewContent(row, participants);
     } else if (sub === 'list') {
       const rows = await services.events.list(guildId);
-      message = rows.length ? rows.map(r => `#${r.id} ${r.title} · ${r.status} · <t:${Math.floor(r.startAt.getTime() / 1000)}:F>`).join('\n') : 'No events found.';
+      message = eventListContent(rows);
     } else if (sub === 'join' || sub === 'leave') {
       const changed = await services.events[sub](guildId, id, interaction.user.id, interaction.user.bot);
       message = changed ? `Event #${id}: ${sub === 'join' ? 'joined' : 'left'}.` : 'No change.';

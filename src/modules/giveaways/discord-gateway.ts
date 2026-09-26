@@ -30,6 +30,7 @@ export class DiscordGiveawayGateway implements GiveawayGateway {
   async validateChannel(id: string) { await this.channel(id); }
   async post(row: Giveaway, entries: number) { const message = await (await this.channel(row.channelId)).send({ content: giveawayContent(row, entries), components: buttons(row), allowedMentions: noMentions }); return message.id; }
   async remove(channelId: string, messageId: string) { await (await this.channel(channelId)).messages.delete(messageId); }
+  isMissingMessage(error: unknown) { return error instanceof DiscordAPIError && error.code === 10008; }
   async refresh(row: Giveaway, entries: number) { if (row.messageId) await (await this.channel(row.channelId)).messages.edit(row.messageId, { content: giveawayContent(row, entries), components: buttons(row), allowedMentions: noMentions }); }
   async announce(row: Giveaway, winners: string[], drawId: number) { const message = await (await this.channel(row.channelId)).send({ content: `Giveaway #${row.id} draw #${drawId} results — ${row.prize}\n${winners.length ? winners.map(id => `<@${id}>`).join(', ') : 'No eligible winners.'}`, allowedMentions: noMentions }); return message.id; }
   async findAnnouncement(row: Giveaway, drawId: number) {

@@ -12,6 +12,7 @@ export interface GiveawayGateway {
   post(row: Giveaway, entries: number): Promise<string>;
   remove(channelId: string, messageId: string): Promise<void>;
   refresh(row: Giveaway, entries: number): Promise<void>;
+  isMissingMessage(error: unknown): boolean;
   announce(row: Giveaway, winners: string[], drawId: number): Promise<string>;
   findAnnouncement(row: Giveaway, drawId: number): Promise<string | null>;
   member(userId: string): Promise<{ bot: boolean; createdAt: Date; joinedAt: Date | null; roleIds: string[] } | null>;
@@ -46,10 +47,19 @@ export class GiveawayService {
       prize, startAt: new Date(), endAt: input.endAt, winnerCount: input.winnerCount, status: 'ACTIVE', messageId: null,
       requiredRoleId: input.requiredRoleId ?? null, minAccountAgeSeconds: input.minAccountAgeSeconds ?? null,
       minGuildAgeSeconds: input.minGuildAgeSeconds ?? null, requireVerified: input.requireVerified ?? false, minLevel: input.minLevel ?? null });
-    try { const messageId = await gateway.post(row, await this.repository.entryCount(row.id)); const attached = await this.repository.attach(actor.guildId, row.id, messageId);
-      if (!attached) { await gateway.remove(row.channelId, messageId); throw new Error('Attachment failed'); }
+    let messageId: string | undefined;
+    try {
+      messageId = await gateway.post(row, await this.repository.entryCount(row.id));
+      const attached = await this.repository.attach(actor.guildId, row.id, messageId);
+      if (!attached) throw new AppError('CONFLICT', 'Giveaway changed before its announcement was attached.');
       return { row: attached, posted: true };
-    } catch { this.logger.warn({ giveawayId: row.id }, 'Giveaway post pending reconciliation'); return { row, posted: false }; }
+    } catch {
+      // The message ID is known, so do not leave a clickable orphan before DB retry.
+      if (messageId) try { await gateway.remove(row.channelId, messageId); }
+      catch { this.logger.warn({ giveawayId: row.id, messageId }, 'Giveaway orphan post needs manual reconciliation'); }
+      this.logger.warn({ giveawayId: row.id }, 'Giveaway post pending reconciliation');
+      return { row, posted: false };
+    }
   }
   async view(guildId: string, id: number) {
     await this.enabled(guildId);
@@ -143,17 +153,33 @@ export class GiveawayService {
     catch { this.logger.warn({ giveawayId: row.id, drawId: draw.id }, 'Giveaway notification reconciliation failed'); }
     const missing = await this.repository.missingPosts(limit);
     for (const row of missing) try { if (await this.modules.isEnabled(row.guildId, 'giveaways')) {
-      const gateway = await this.gateway(row.guildId);
-      const messageId = await gateway.post(row, await this.repository.entryCount(row.id));
-      if (!await this.repository.attach(row.guildId, row.id, messageId)) await gateway.remove(row.channelId, messageId);
+      const token = await this.repository.claimPost(row.guildId, row.id);
+      if (!token) continue;
+      let messageId: string | null = null;
+      try {
+        const gateway = await this.gateway(row.guildId);
+        messageId = await gateway.post(row, await this.repository.entryCount(row.id));
+        if (!await this.repository.finishPost(row.guildId, row.id, token, messageId)) {
+          try { await gateway.remove(row.channelId, messageId); } catch { this.logger.warn({ giveawayId: row.id, messageId }, 'Orphan giveaway post cleanup failed'); }
+        }
+      } catch (error) {
+        // A send may have succeeded before its response failed; reconciliation remains best effort.
+        if (messageId) try { await (await this.gateway(row.guildId)).remove(row.channelId, messageId); } catch { /* retry cleanup requires operator intervention */ }
+        await this.repository.releasePost(row.guildId, row.id, token);
+        throw error;
+      }
     } } catch { this.logger.warn({ giveawayId: row.id }, 'Giveaway post reconciliation failed'); }
     // Round-robin reconciliation repairs counts and disabled buttons after transient Discord failures.
     const refreshes = await this.repository.refreshCandidates(limit);
     for (const row of refreshes) {
       try { if (await this.modules.isEnabled(row.guildId, 'giveaways'))
         await (await this.gateway(row.guildId)).refresh(row, await this.repository.entryCount(row.id)); }
-      catch { this.logger.warn({ giveawayId: row.id }, 'Giveaway message refresh pending retry'); }
-      finally { await this.repository.markRefreshAttempt(row.id); }
+      catch (error) {
+        if ((await this.gateway(row.guildId)).isMissingMessage(error) && row.status === 'ACTIVE') {
+          await this.repository.markMissing(row.guildId, row.id, row.messageId!);
+        } else this.logger.warn({ giveawayId: row.id }, 'Giveaway message refresh pending retry');
+      }
+      finally { await this.repository.markRefreshAttempt(row.id, row.messageId!); }
     }
     return rows.length + pending.length + missing.length + refreshes.length;
   }

@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Database } from '../../core/database/connection.js';
 import { tempvoiceRooms, tempvoiceSettings } from '../../core/database/schema.js';
 import { AppError } from '../../core/errors/errors.js';
@@ -38,8 +38,18 @@ export class TempvoiceRepository {
   async markEmpty(guildId: string, channelId: string, empty: boolean) {
     await this.db.update(tempvoiceRooms).set({ emptySince: empty ? new Date() : null, updatedAt: new Date() }).where(and(eq(tempvoiceRooms.guildId, guildId), eq(tempvoiceRooms.channelId, channelId), eq(tempvoiceRooms.status, 'ACTIVE'), empty ? isNull(tempvoiceRooms.emptySince) : isNotNull(tempvoiceRooms.emptySince)));
   }
-  async pending(now: Date, graceMs: number) { return this.db.select().from(tempvoiceRooms).where(and(eq(tempvoiceRooms.status, 'ACTIVE'), isNotNull(tempvoiceRooms.emptySince), lte(tempvoiceRooms.emptySince, new Date(now.getTime() - graceMs)))); }
+  async pending(now: Date, graceMs: number, limit = 20) { return this.db.select().from(tempvoiceRooms)
+    .where(and(eq(tempvoiceRooms.status, 'ACTIVE'), isNotNull(tempvoiceRooms.emptySince), lte(tempvoiceRooms.emptySince, new Date(now.getTime() - graceMs))))
+    .orderBy(asc(tempvoiceRooms.emptySince), asc(tempvoiceRooms.id)).limit(Math.min(20, Math.max(1, limit))); }
   async outstanding() { return this.db.select().from(tempvoiceRooms).where(inArray(tempvoiceRooms.status, live)); }
+  /** One bounded wakeup; deferred or failed rooms move behind older pending work. */
+  async outstandingDue(now: Date, graceMs: number, limit = 20) { const cutoff = new Date(now.getTime() - graceMs);
+    return this.db.select().from(tempvoiceRooms).where(and(lte(tempvoiceRooms.updatedAt, cutoff),
+      or(and(eq(tempvoiceRooms.status, 'CREATING'), lte(tempvoiceRooms.createdAt, cutoff)), eq(tempvoiceRooms.status, 'DELETING'))))
+      .orderBy(asc(tempvoiceRooms.updatedAt), asc(tempvoiceRooms.id)).limit(Math.min(20, Math.max(1, limit)));
+  }
+  async deferUnresolved(id: number, now: Date) { await this.db.update(tempvoiceRooms).set({ updatedAt: now })
+    .where(and(eq(tempvoiceRooms.id, id), eq(tempvoiceRooms.status, 'CREATING'), isNull(tempvoiceRooms.channelId))); }
   /** Row lock serializes bot DB operations; Discord members can still join externally during cleanup. */
   async cleanup(id: number, eligible: (room: TempvoiceRoom) => boolean, remove: (room: TempvoiceRoom) => Promise<boolean | 'occupied'>) {
     return this.db.transaction(async tx => {
@@ -48,7 +58,8 @@ export class TempvoiceRepository {
       if (room.channelId) {
         const result = await remove(room);
         if (result === 'occupied') {
-          await tx.update(tempvoiceRooms).set({ emptySince: null, status: room.status === 'CREATING' ? 'ACTIVE' : room.status, updatedAt: new Date() }).where(eq(tempvoiceRooms.id, id)); return false;
+          // A real occupant won the Discord race: restore normal ownership and controls.
+          await tx.update(tempvoiceRooms).set({ emptySince: null, status: 'ACTIVE', updatedAt: new Date() }).where(eq(tempvoiceRooms.id, id)); return false;
         }
         if (!result) { await tx.update(tempvoiceRooms).set({ status: 'DELETING', updatedAt: new Date() }).where(eq(tempvoiceRooms.id, id)); return false; }
       }

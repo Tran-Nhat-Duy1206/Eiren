@@ -74,7 +74,22 @@ export class DiscordTempvoiceGateway implements TempvoiceGateway {
   }
   async move(id: string, channelId: string) { await (await this.guild.members.fetch(id)).voice.setChannel(await this.voice(channelId)); }
   async exists(id: string) { try { await this.voice(id); return true; } catch (error) { if (error instanceof AppError && error.code === 'NOT_FOUND') return false; throw error; } }
-  async occupants(id: string) { const channel = await this.voice(id); await this.guild.members.fetch(); return [...channel.members.keys()]; }
+  async occupants(id: string) {
+    await this.voice(id);
+    // The initial GUILD_CREATE voice-state snapshot must be available before an empty
+    // cache can mean an empty room. Never use a bulk member fetch: it needs GuildMembers.
+    if (this.guild.available === false || this.guild.client.isReady?.() === false || !this.guild.voiceStates?.cache)
+      throw new AppError('CONFLICT', 'Voice state snapshot is unavailable.');
+    const humans: string[] = [];
+    for (const state of this.guild.voiceStates.cache.values()) {
+      if (state.channelId !== id) continue;
+      const member = state.member ?? this.guild.members.cache.get(state.id) ?? await this.guild.members.fetch(state.id);
+      if (!member?.user || typeof member.user.bot !== 'boolean')
+        throw new AppError('CONFLICT', 'Voice occupant identity is unavailable.');
+      if (!member.user.bot) humans.push(state.id);
+    }
+    return humans;
+  }
   async delete(id: string) { try { await (await this.voice(id)).delete('Temporary voice room empty'); } catch (error) { if (error instanceof AppError && error.code === 'NOT_FOUND') return; if (error instanceof DiscordAPIError && error.code === 10003) return; throw error; } }
   async rename(id: string, name: string) { const channel = await this.voice(id); const marker = channel.name.match(/^temp-\d+-/); if (!marker) throw new AppError('CONFLICT', 'Room reservation marker is missing.'); await channel.setName(`${marker[0]}${name}`.slice(0, 100)); }
   async limit(id: string, limit: number) { await (await this.voice(id)).setUserLimit(limit); }
