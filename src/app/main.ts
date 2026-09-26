@@ -1,10 +1,12 @@
 import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
 import { loadEnv } from '../core/config/env.js';
 import { createDatabase } from '../core/database/connection.js';
-import { guilds, moderationCases, moderatorNotes, verificationSettings, memberVerifications, antiraidSettings, joinHistory } from '../core/database/schema.js';
+import { guilds, moderationCases, moderatorNotes, verificationSettings, memberVerifications, antiraidSettings, joinHistory,
+  roleMenus, roleMenuOptions, ticketSettings, tickets as ticketRows, ticketParticipants, reports as reportRows, appeals,
+  suggestionSettings, suggestions as suggestionRows, suggestionVotes } from '../core/database/schema.js';
 import { createLogger } from '../core/logger/logger.js';
 import { registerCommands } from '../core/commands/dispatcher.js';
-import { registerComponents } from '../core/components/component.js';
+import { registerComponents, registerSelects } from '../core/components/component.js';
 import { registerEvents } from '../core/events/event.js';
 import { PermissionService } from '../core/permissions/permission-service.js';
 import { GuildRepository } from '../repositories/guild-repository.js';
@@ -23,6 +25,16 @@ import { ModerationScheduler } from '../modules/moderation/scheduler.js';
 import { DiscordVerificationGateway } from '../modules/verification/discord-gateway.js';
 import { VerificationRepository } from '../modules/verification/repository.js';
 import { VerificationService } from '../modules/verification/service.js';
+import { RoleMenuRepository } from '../modules/roles/repository.js';
+import { RoleMenuService } from '../modules/roles/service.js';
+import { TicketRepository } from '../modules/tickets/repository.js';
+import { TicketService } from '../modules/tickets/service.js';
+import { DiscordTicketGateway } from '../modules/tickets/discord-gateway.js';
+import { ReportRepository } from '../modules/reports/repository.js';
+import { ReportService } from '../modules/reports/service.js';
+import { SuggestionRepository } from '../modules/suggestions/repository.js';
+import { SuggestionService } from '../modules/suggestions/service.js';
+import { DiscordSuggestionGateway } from '../modules/suggestions/discord-gateway.js';
 
 const env = loadEnv();
 const logger = createLogger(env.LOG_LEVEL);
@@ -69,7 +81,14 @@ const antiraid = new AntiRaidService(antiRaidRepository, permissions, logger, no
     const settings = await guildConfig.get(guildId);
     return Boolean(settings?.securityLogChannelId);
   });
-const services = { logger, repository, guildConfig, permissions, modules, guildLogs, moderation, verification, antiraid };
+const roles = new RoleMenuService(new RoleMenuRepository(db), client, notifier);
+const tickets = new TicketService(new TicketRepository(db), permissions, logger,
+  async guildId => new DiscordTicketGateway(await client.guilds.fetch(guildId)), notifier);
+const reports = new ReportService(new ReportRepository(db), permissions, notifier);
+const suggestions = new SuggestionService(new SuggestionRepository(db), permissions,
+  async guildId => new DiscordSuggestionGateway(await client.guilds.fetch(guildId)), logger, { send: notifier });
+const services = { logger, repository, guildConfig, permissions, modules, guildLogs, moderation, verification, antiraid,
+  roles, tickets, reports, suggestions };
 const scheduler = new ModerationScheduler(moderation, async guildId => {
   const guild = await client.guilds.fetch(guildId);
   if (!client.user) throw new Error('Bot not logged in');
@@ -90,11 +109,22 @@ const lifecycle = createBotLifecycle({
     await db.select({ id: memberVerifications.id }).from(memberVerifications).limit(1);
     await db.select({ id: antiraidSettings.guildId }).from(antiraidSettings).limit(1);
     await db.select({ id: joinHistory.id }).from(joinHistory).limit(1);
+    await db.select({ id: roleMenus.id }).from(roleMenus).limit(1);
+    await db.select({ id: roleMenuOptions.id }).from(roleMenuOptions).limit(1);
+    await db.select({ id: ticketSettings.guildId }).from(ticketSettings).limit(1);
+    await db.select({ id: ticketRows.id }).from(ticketRows).limit(1);
+    await db.select({ id: ticketParticipants.ticketId }).from(ticketParticipants).limit(1);
+    await db.select({ id: reportRows.id }).from(reportRows).limit(1);
+    await db.select({ id: appeals.id }).from(appeals).limit(1);
+    await db.select({ id: suggestionSettings.guildId }).from(suggestionSettings).limit(1);
+    await db.select({ id: suggestionRows.id }).from(suggestionRows).limit(1);
+    await db.select({ id: suggestionVotes.suggestionId }).from(suggestionVotes).limit(1);
   },
   register() {
     registerCommands(client, registry.commands, services);
     registerEvents(client, registry.events, services);
     registerComponents(client, registry.components, services);
+    registerSelects(client, registry.selects, services);
     client.once(Events.ClientReady, () => {
       scheduler.start();
       void pruneHistory();

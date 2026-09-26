@@ -1,4 +1,4 @@
-import { boolean, check, index, integer, jsonb, pgTable, primaryKey, bigserial, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, index, integer, jsonb, pgTable, primaryKey, bigserial, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const guilds = pgTable('guilds', {
@@ -154,4 +154,148 @@ export const moderatorNotes = pgTable('moderator_notes', {
 }, table => [
   index('moderator_notes_guild_target_created_idx').on(table.guildId, table.targetId, table.createdAt),
   check('moderator_notes_content_check', sql`length(trim(${table.content})) > 0`),
+]);
+
+// V3 community workflows. Discord IDs remain text; numeric IDs belong to the bot.
+export const roleMenus = pgTable('role_menus', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  kind: text('kind').notNull().default('BUTTON'),
+  exclusive: boolean('exclusive').notNull().default(false),
+  maxValues: integer('max_values').notNull().default(1),
+  enabled: boolean('enabled').notNull().default(true),
+  channelId: text('channel_id'),
+  messageId: text('message_id'),
+  createdBy: text('created_by').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  index('role_menus_guild_idx').on(table.guildId),
+  uniqueIndex('role_menus_guild_message_unique').on(table.guildId, table.messageId),
+  check('role_menus_kind_check', sql`${table.kind} IN ('BUTTON','SELECT')`),
+  check('role_menus_max_check', sql`${table.maxValues} BETWEEN 1 AND 25`),
+]);
+
+export const roleMenuOptions = pgTable('role_menu_options', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  menuId: bigint('menu_id', { mode: 'number' }).notNull().references(() => roleMenus.id, { onDelete: 'cascade' }),
+  roleId: text('role_id').notNull(),
+  label: text('label').notNull(),
+  description: text('description'),
+  requiredRoleId: text('required_role_id'),
+  forbiddenRoleId: text('forbidden_role_id'),
+  position: integer('position').notNull().default(0),
+}, table => [
+  uniqueIndex('role_menu_options_menu_role_unique').on(table.menuId, table.roleId),
+  index('role_menu_options_menu_position_idx').on(table.menuId, table.position),
+]);
+
+export const ticketSettings = pgTable('ticket_settings', {
+  guildId: text('guild_id').primaryKey().references(() => guilds.id, { onDelete: 'cascade' }),
+  staffRoleId: text('staff_role_id'),
+  transcriptChannelId: text('transcript_channel_id'),
+  maxActiveTickets: integer('max_active_tickets').notNull().default(1),
+}, table => [check('ticket_settings_max_active_check', sql`${table.maxActiveTickets} BETWEEN 1 AND 10`)]);
+
+export const tickets = pgTable('tickets', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  creatorId: text('creator_id').notNull(),
+  type: text('type').notNull(),
+  channelId: text('channel_id'),
+  assignedStaffId: text('assigned_staff_id'),
+  status: text('status').notNull().default('OPEN'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  claimedAt: timestamp('claimed_at', { withTimezone: true }),
+  closedAt: timestamp('closed_at', { withTimezone: true }),
+  closedBy: text('closed_by'),
+  closeReason: text('close_reason'),
+  transcript: text('transcript'),
+  transcriptGeneratedAt: timestamp('transcript_generated_at', { withTimezone: true }),
+}, table => [
+  index('tickets_guild_creator_status_idx').on(table.guildId, table.creatorId, table.status),
+  uniqueIndex('tickets_guild_channel_unique').on(table.guildId, table.channelId),
+  check('tickets_type_check', sql`${table.type} IN ('SUPPORT','REPORT','APPEAL','PARTNERSHIP','BUG_REPORT','OTHER')`),
+  check('tickets_status_check', sql`${table.status} IN ('OPEN','CLAIMED','CLOSED')`),
+]);
+
+export const ticketParticipants = pgTable('ticket_participants', {
+  ticketId: bigint('ticket_id', { mode: 'number' }).notNull().references(() => tickets.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  addedBy: text('added_by').notNull(),
+  addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [primaryKey({ columns: [table.ticketId, table.userId] })]);
+
+export const reports = pgTable('reports', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  reporterId: text('reporter_id').notNull(),
+  reportedUserId: text('reported_user_id'),
+  category: text('category').notNull(),
+  description: text('description').notNull(),
+  evidenceUrl: text('evidence_url'),
+  status: text('status').notNull().default('OPEN'),
+  assignedStaffId: text('assigned_staff_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  closedAt: timestamp('closed_at', { withTimezone: true }),
+  closedBy: text('closed_by'),
+  resolutionNote: text('resolution_note'),
+}, table => [
+  index('reports_guild_status_created_idx').on(table.guildId, table.status, table.createdAt),
+  index('reports_reporter_created_idx').on(table.guildId, table.reporterId, table.createdAt),
+  check('reports_status_check', sql`${table.status} IN ('OPEN','UNDER_REVIEW','CLOSED')`),
+]);
+
+export const appeals = pgTable('appeals', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  appellantId: text('appellant_id').notNull(),
+  caseId: bigint('case_id', { mode: 'number' }).references(() => moderationCases.id, { onDelete: 'set null' }),
+  reason: text('reason').notNull(),
+  status: text('status').notNull().default('PENDING'),
+  reviewerId: text('reviewer_id'),
+  reviewNote: text('review_note'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+}, table => [
+  index('appeals_guild_status_created_idx').on(table.guildId, table.status, table.createdAt),
+  index('appeals_appellant_created_idx').on(table.guildId, table.appellantId, table.createdAt),
+  uniqueIndex('appeals_pending_case_unique').on(table.guildId, table.appellantId, table.caseId)
+    .where(sql`${table.status} = 'PENDING' AND ${table.caseId} IS NOT NULL`),
+  check('appeals_status_check', sql`${table.status} IN ('PENDING','ACCEPTED','REJECTED')`),
+]);
+
+export const suggestionSettings = pgTable('suggestion_settings', {
+  guildId: text('guild_id').primaryKey().references(() => guilds.id, { onDelete: 'cascade' }),
+  channelId: text('channel_id'),
+});
+
+export const suggestions = pgTable('suggestions', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  authorId: text('author_id').notNull(),
+  content: text('content').notNull(),
+  status: text('status').notNull().default('PENDING'),
+  channelId: text('channel_id'),
+  messageId: text('message_id'),
+  staffResponse: text('staff_response'),
+  reviewedBy: text('reviewed_by'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  index('suggestions_guild_status_created_idx').on(table.guildId, table.status, table.createdAt),
+  uniqueIndex('suggestions_guild_message_unique').on(table.guildId, table.messageId),
+  check('suggestions_status_check', sql`${table.status} IN ('PENDING','UNDER_REVIEW','ACCEPTED','REJECTED','IMPLEMENTED')`),
+]);
+
+export const suggestionVotes = pgTable('suggestion_votes', {
+  suggestionId: bigint('suggestion_id', { mode: 'number' }).notNull().references(() => suggestions.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  vote: integer('vote').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  primaryKey({ columns: [table.suggestionId, table.userId] }),
+  check('suggestion_votes_value_check', sql`${table.vote} IN (-1, 1)`),
 ]);
