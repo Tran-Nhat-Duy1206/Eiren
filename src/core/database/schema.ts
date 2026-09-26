@@ -299,3 +299,119 @@ export const suggestionVotes = pgTable('suggestion_votes', {
   primaryKey({ columns: [table.suggestionId, table.userId] }),
   check('suggestion_votes_value_check', sql`${table.vote} IN (-1, 1)`),
 ]);
+
+// V4 social features. Aggregates are guild-scoped; no full message content is stored.
+export const levelsSettings = pgTable('levels_settings', {
+  guildId: text('guild_id').primaryKey().references(() => guilds.id, { onDelete: 'cascade' }),
+  cooldownSeconds: integer('cooldown_seconds').notNull().default(60),
+  xpPerMessage: integer('xp_per_message').notNull().default(10),
+  minLength: integer('min_length').notNull().default(12),
+  levelUpChannelId: text('level_up_channel_id'),
+}, table => [
+  check('levels_settings_cooldown_check', sql`${table.cooldownSeconds} BETWEEN 5 AND 3600`),
+  check('levels_settings_xp_check', sql`${table.xpPerMessage} BETWEEN 1 AND 100`),
+  check('levels_settings_min_length_check', sql`${table.minLength} BETWEEN 0 AND 1000`),
+]);
+
+export const memberLevels = pgTable('member_levels', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  xp: bigint('xp', { mode: 'number' }).notNull().default(0),
+  messageCount: integer('message_count').notNull().default(0),
+  lastXpAt: timestamp('last_xp_at', { withTimezone: true }),
+  lastMessageId: text('last_message_id'),
+  lastFingerprint: text('last_fingerprint'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  primaryKey({ columns: [table.guildId, table.userId] }),
+  index('member_levels_leaderboard_idx').on(table.guildId, table.xp.desc(), table.userId),
+  check('member_levels_xp_check', sql`${table.xp} >= 0`),
+  check('member_levels_message_count_check', sql`${table.messageCount} >= 0`),
+]);
+
+export const levelRewards = pgTable('level_rewards', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  level: integer('level').notNull(),
+  roleId: text('role_id').notNull(),
+}, table => [
+  primaryKey({ columns: [table.guildId, table.level, table.roleId] }),
+  check('level_rewards_level_check', sql`${table.level} BETWEEN 1 AND 10000`),
+]);
+
+export const levelIgnoredChannels = pgTable('level_ignored_channels', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  channelId: text('channel_id').notNull(),
+}, table => [primaryKey({ columns: [table.guildId, table.channelId] })]);
+
+export const reputationSettings = pgTable('reputation_settings', {
+  guildId: text('guild_id').primaryKey().references(() => guilds.id, { onDelete: 'cascade' }),
+  globalCooldownSeconds: integer('global_cooldown_seconds').notNull().default(86400),
+  sameTargetCooldownSeconds: integer('same_target_cooldown_seconds').notNull().default(604800),
+}, table => [
+  check('reputation_global_cooldown_check', sql`${table.globalCooldownSeconds} BETWEEN 60 AND 604800`),
+  check('reputation_target_cooldown_check', sql`${table.sameTargetCooldownSeconds} BETWEEN ${table.globalCooldownSeconds} AND 2592000`),
+]);
+
+export const memberReputation = pgTable('member_reputation', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  score: integer('score').notNull().default(0),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  primaryKey({ columns: [table.guildId, table.userId] }),
+  index('member_reputation_guild_score_idx').on(table.guildId, table.score.desc(), table.userId),
+  check('member_reputation_score_check', sql`${table.score} >= 0`),
+]);
+
+export const reputationGrants = pgTable('reputation_grants', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  giverId: text('giver_id').notNull(),
+  receiverId: text('receiver_id').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  index('reputation_grants_giver_recent_idx').on(table.guildId, table.giverId, table.createdAt.desc()),
+  index('reputation_grants_target_recent_idx').on(table.guildId, table.giverId, table.receiverId, table.createdAt.desc()),
+  index('reputation_grants_receiver_idx').on(table.guildId, table.receiverId),
+  check('reputation_grants_no_self_check', sql`${table.giverId} <> ${table.receiverId}`),
+]);
+
+export const starboardSettings = pgTable('starboard_settings', {
+  guildId: text('guild_id').primaryKey().references(() => guilds.id, { onDelete: 'cascade' }),
+  enabled: boolean('enabled').notNull().default(false),
+  channelId: text('channel_id'),
+  emoji: text('emoji').notNull().default('⭐'),
+  threshold: integer('threshold').notNull().default(5),
+  allowSelf: boolean('allow_self').notNull().default(false),
+  allowBotMessages: boolean('allow_bot_messages').notNull().default(false),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  check('starboard_settings_threshold_check', sql`${table.threshold} BETWEEN 1 AND 25`),
+  check('starboard_settings_emoji_check', sql`length(trim(${table.emoji})) BETWEEN 1 AND 100`),
+]);
+
+export const starboardIgnoredChannels = pgTable('starboard_ignored_channels', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  channelId: text('channel_id').notNull(),
+}, table => [primaryKey({ columns: [table.guildId, table.channelId] })]);
+
+export const starboardMessages = pgTable('starboard_messages', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  sourceChannelId: text('source_channel_id').notNull(),
+  sourceMessageId: text('source_message_id').notNull(),
+  sourceAuthorId: text('source_author_id').notNull(),
+  starboardChannelId: text('starboard_channel_id'),
+  starboardMessageId: text('starboard_message_id'),
+  starCount: integer('star_count').notNull().default(0),
+  status: text('status').notNull().default('PENDING'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex('starboard_messages_source_unique').on(table.guildId, table.sourceMessageId),
+  uniqueIndex('starboard_messages_post_unique').on(table.guildId, table.starboardMessageId),
+  index('starboard_messages_guild_status_idx').on(table.guildId, table.status),
+  check('starboard_messages_status_check', sql`${table.status} IN ('PENDING','POSTED','REMOVED','DELETED')`),
+  check('starboard_messages_count_check', sql`${table.starCount} >= 0`),
+]);

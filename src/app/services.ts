@@ -11,6 +11,10 @@ import type { RoleMenuService } from '../modules/roles/service.js';
 import type { TicketService } from '../modules/tickets/service.js';
 import type { ReportService } from '../modules/reports/service.js';
 import type { SuggestionService } from '../modules/suggestions/service.js';
+import type { LevelsService } from '../modules/levels/service.js';
+import type { ReputationService } from '../modules/reputation/service.js';
+import type { StarboardService } from '../modules/starboard/service.js';
+import type { ProfileService } from '../modules/profiles/service.js';
 
 export interface Services {
   logger: Logger;
@@ -26,4 +30,8 @@ export interface Services {
   tickets: TicketService;
   reports: ReportService;
   suggestions: SuggestionService;
+  levels: LevelsService;
+  reputation: ReputationService;
+  starboard: StarboardService;
+  profiles: ProfileService;
 }

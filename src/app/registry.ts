@@ -17,6 +17,12 @@ import { ticketCommands } from '../modules/tickets/commands.js';
 import { reportCommands } from '../modules/reports/commands.js';
 import { suggestionCommands } from '../modules/suggestions/commands.js';
 import { suggestionButtons } from '../modules/suggestions/components.js';
+import { levelsCommands } from '../modules/levels/commands.js';
+import { levelsEvents } from '../modules/levels/events.js';
+import { reputationCommands } from '../modules/reputation/commands.js';
+import { starboardCommands } from '../modules/starboard/commands.js';
+import { starboardEvents } from '../modules/starboard/events.js';
+import { profileCommands } from '../modules/profiles/commands.js';
 
 export interface ModuleManifest {
   definition: ModuleDefinition;
@@ -37,6 +43,10 @@ export const manifests: readonly ModuleManifest[] = [
   { definition: { key: 'tickets', defaultEnabled: false }, commands: ticketCommands, events: [] },
   { definition: { key: 'reports', defaultEnabled: false }, commands: reportCommands, events: [] },
   { definition: { key: 'suggestions', defaultEnabled: false }, commands: suggestionCommands, events: [], components: suggestionButtons },
+  { definition: { key: 'levels', defaultEnabled: false }, commands: levelsCommands, events: levelsEvents },
+  { definition: { key: 'reputation', defaultEnabled: false }, commands: reputationCommands, events: [] },
+  { definition: { key: 'starboard', defaultEnabled: false }, commands: starboardCommands, events: starboardEvents },
+  { definition: { key: 'profiles', defaultEnabled: false }, commands: profileCommands, events: [] },
 ];
 
 export function buildRegistry(modules: readonly ModuleManifest[]) {
