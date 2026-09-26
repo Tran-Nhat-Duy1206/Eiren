@@ -71,7 +71,7 @@ describe('role menu stable controls', () => {
   it('refuses published panel changes that would desynchronize select labels or maximum, while allowing enable', async () => {
     const update = vi.fn(async (_guild: string, _id: number, patch: object) => ({ ...menu, ...patch }));
     const notify = vi.fn(async (_guildId: string, _category: 'general', _title: string) => { throw Error('logs unavailable'); });
-    const service = new RoleMenuService({ get: async () => ({ ...menu, kind: 'SELECT' }), update,
+    const service = new RoleMenuService({ lockMenu: async (_guild: string, _id: number, work: (tx: never, current: Parameters<typeof panel>[0]) => Promise<unknown>) => work({} as never, { ...menu, kind: 'SELECT' }), update,
       create: async (data: object) => ({ ...menu, ...data }) } as unknown as RoleMenuRepository, {} as Client, notify as GuildLogNotifier);
     await expect(service.edit('guild', 12, { name: 'Other' })).rejects.toThrow('Published panel settings');
     await expect(service.edit('guild', 12, { maxValues: 1 })).rejects.toThrow('Published panel settings');
@@ -81,6 +81,53 @@ describe('role menu stable controls', () => {
     await expect(service.create('guild', 'actor', 'Fresh', 'SELECT', false, 2)).resolves.toMatchObject({ name: 'Fresh' });
     expect(notify).toHaveBeenCalledTimes(2);
     expect(notify.mock.calls.map(call => call[2])).toEqual(['Role menu edited', 'Role menu created']);
+  });
+  it('enforces button and select label boundaries before insertion and on legacy rendering', async () => {
+    for (const kind of ['BUTTON', 'SELECT'] as const) {
+      const limit = kind === 'BUTTON' ? 78 : 80;
+      const insert = vi.fn(async () => options[0]);
+      const repo = { lockMenu: async (_guild: string, _id: number, work: (tx: never, current: Parameters<typeof panel>[0]) => Promise<unknown>) => work({} as never, { ...menu, kind, messageId: null }),
+        options: async () => [], isPermissionRole: async () => false, addOption: insert };
+      const guild = { id: 'guild', roles: { fetch: async (id: string) => ({ id, managed: false, editable: true, permissions: { any: () => false } }) } };
+      const service = new RoleMenuService(repo as unknown as RoleMenuRepository, { guilds: { fetch: async () => guild } } as unknown as Client);
+      await expect(service.addOption('guild', 12, '1', 'x'.repeat(limit), null, null, null)).resolves.toBeDefined();
+      expect(insert).toHaveBeenCalledTimes(1);
+      for (const length of [79, 80].filter(value => value > limit))
+        await expect(service.addOption('guild', 12, '1', 'x'.repeat(length), null, null, null)).rejects.toThrow('Option label exceeds');
+      expect(() => panel({ ...menu, kind }, [{ ...options[0]!, label: 'x'.repeat(limit + 1) }])).toThrow('Option label exceeds');
+    }
+  });
+  it('serializes concurrent publish and cleans up sent messages after rollback', async () => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const firstEntered = new Promise<void>(resolve => { entered = resolve; });
+    let association: string | null = null;
+    let queue = Promise.resolve();
+    const sent = { id: 'posted', delete: vi.fn(async () => {}) };
+    const send = vi.fn(async () => { entered(); await held; return sent; });
+    const repository = { lockMenu: (_guild: string, _id: number, work: (tx: object, current: Parameters<typeof panel>[0]) => Promise<unknown>) => {
+      const pending = queue.then(() => work({}, { ...menu, messageId: association }));
+      queue = pending.then(() => {}, () => {});
+      return pending;
+    }, options: vi.fn(async () => options), isPermissionRole: vi.fn(async () => false),
+    update: vi.fn(async (_guild: string, _id: number, patch: { messageId: string }) => { association = patch.messageId; return { ...menu, ...patch }; }) };
+    const channel = { type: 0, permissionsFor: () => ({ has: () => true }), send };
+    const guild = { id: 'guild', channels: { fetch: async () => channel }, members: { fetchMe: async () => ({}) },
+      roles: { fetch: async (id: string) => ({ id, managed: false, editable: true, permissions: { any: () => false } }) } };
+    const service = new RoleMenuService(repository as unknown as RoleMenuRepository, { guilds: { fetch: async () => guild } } as unknown as Client);
+    const winner = service.publish('guild', 12, 'channel');
+    await firstEntered;
+    const loser = service.publish('guild', 12, 'channel');
+    release();
+    await expect(winner).resolves.toBe(sent);
+    await expect(loser).rejects.toThrow('already published');
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(sent.delete).not.toHaveBeenCalled();
+    association = null;
+    repository.update.mockRejectedValueOnce(Error('commit failed'));
+    await expect(service.publish('guild', 12, 'channel')).rejects.toThrow('commit failed');
+    expect(sent.delete).toHaveBeenCalledTimes(1);
   });
   it('never fails successful mutation when optional notifier fails', async () => {
     const f = fixture([], { notify: async () => { throw Error('logging offline'); } });

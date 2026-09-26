@@ -24,6 +24,8 @@ export function parsePanelId(customId: string, prefix: string): { menuId: number
 export function panel(menu: RoleMenu, options: RoleMenuOption[]) {
   if (!options.length || options.length > 25) return fail('A panel needs between 1 and 25 options.');
   if (menu.kind === 'BUTTON' && options.length > 12) return fail('Button menus support at most 12 options.');
+  if (options.some(option => !option.label || option.label.length > (menu.kind === 'BUTTON' ? 78 : 80)))
+    return fail('Option label exceeds Discord component limit.');
   const components = menu.kind === 'BUTTON'
     ? Array.from({ length: Math.ceil(options.length * 2 / 5) }, (_, index) => new ActionRowBuilder<ButtonBuilder>().addComponents(
       options.flatMap(option => [
@@ -59,56 +61,79 @@ export class RoleMenuService {
   async get(guildId: string, id: number, tx?: RoleMenuTransaction) { return await this.repo.get(guildId, id, tx) ?? fail('Role menu not found.'); }
   list(guildId: string) { return this.repo.list(guildId); }
   async edit(guildId: string, id: number, patch: Partial<Pick<RoleMenu, 'name' | 'exclusive' | 'maxValues' | 'enabled'>>) {
-    const previous = await this.get(guildId, id);
-    const exclusive = patch.exclusive ?? previous.exclusive;
-    const max = patch.maxValues ?? previous.maxValues;
-    if (patch.name !== undefined && (!patch.name.trim() || patch.name.length > 100)) return fail('Invalid menu name.');
-    if (!Number.isInteger(max) || max < 1 || max > 25 || (exclusive && max !== 1)) return fail('Invalid maximum (exclusive menus require 1).');
-    if (previous.messageId && ((patch.name !== undefined && patch.name.trim() !== previous.name) ||
-        (patch.exclusive !== undefined && patch.exclusive !== previous.exclusive) ||
-        (patch.maxValues !== undefined && patch.maxValues !== previous.maxValues)))
-      return fail('Published panel settings cannot change. Delete and recreate the menu to republish.');
-    if (patch.name !== undefined) patch.name = patch.name.trim();
-    const updated = await this.repo.update(guildId, id, patch);
+    const updated = await this.repo.lockMenu(guildId, id, async (tx, previous) => {
+      const exclusive = patch.exclusive ?? previous.exclusive;
+      const max = patch.maxValues ?? previous.maxValues;
+      if (patch.name !== undefined && (!patch.name.trim() || patch.name.length > 100)) return fail('Invalid menu name.');
+      if (!Number.isInteger(max) || max < 1 || max > 25 || (exclusive && max !== 1)) return fail('Invalid maximum (exclusive menus require 1).');
+      if (previous.messageId && ((patch.name !== undefined && patch.name.trim() !== previous.name) ||
+          (patch.exclusive !== undefined && patch.exclusive !== previous.exclusive) ||
+          (patch.maxValues !== undefined && patch.maxValues !== previous.maxValues)))
+        return fail('Published panel settings cannot change. Delete and recreate the menu to republish.');
+      if (patch.name !== undefined) patch.name = patch.name.trim();
+      return this.repo.update(guildId, id, patch, tx);
+    });
     if (updated) try { await this.notify?.(guildId, 'general', 'Role menu edited', [{ name: 'Menu', value: String(id) }]); } catch { /* Optional logging must not fail editing. */ }
     return updated;
   }
   async addOption(guildId: string, id: number, roleId: string, label: string, description: string | null, requiredRoleId: string | null, forbiddenRoleId: string | null) {
-    const menu = await this.get(guildId, id);
-    if (menu.messageId) return fail('Edit published menus by deleting and recreating the panel.');
-    const guild = await this.guild(guildId);
-    await this.safeRole(guild, roleId);
-    if (requiredRoleId) await guild.roles.fetch(requiredRoleId).then(role => role || fail('Required role does not exist.'));
-    if (forbiddenRoleId) await guild.roles.fetch(forbiddenRoleId).then(role => role || fail('Forbidden role does not exist.'));
-    const options = await this.repo.options(id);
-    if (options.length >= (menu.kind === 'BUTTON' ? 12 : 25) || options.some(option => option.roleId === roleId)) return fail('Menu full or role already added.');
-    if (!label.trim() || label.length > 80 || (description && description.length > 100)) return fail('Invalid option label or description.');
-    return this.repo.addOption({ menuId: id, roleId, label: label.trim(), description, requiredRoleId, forbiddenRoleId, position: options.length });
+    const normalized = label.trim();
+    if (!normalized || (description && description.length > 100)) return fail('Invalid option label or description.');
+    return this.repo.lockMenu(guildId, id, async (tx, menu) => {
+      if (menu.messageId) return fail('Edit published menus by deleting and recreating the panel.');
+      if (normalized.length > (menu.kind === 'BUTTON' ? 78 : 80)) return fail(`Option label exceeds ${menu.kind === 'BUTTON' ? 78 : 80} characters.`);
+      const guild = await this.guild(guildId);
+      await this.safeRole(guild, roleId, tx);
+      if (requiredRoleId) await guild.roles.fetch(requiredRoleId).then(role => role || fail('Required role does not exist.'));
+      if (forbiddenRoleId) await guild.roles.fetch(forbiddenRoleId).then(role => role || fail('Forbidden role does not exist.'));
+      const options = await this.repo.options(id, tx);
+      if (options.length >= (menu.kind === 'BUTTON' ? 12 : 25) || options.some(option => option.roleId === roleId)) return fail('Menu full or role already added.');
+      return this.repo.addOption({ menuId: id, roleId, label: normalized, description, requiredRoleId, forbiddenRoleId, position: options.length }, tx);
+    });
   }
   async removeOption(guildId: string, id: number, optionId: number) {
-    const menu = await this.get(guildId, id);
-    if (menu.messageId) return fail('Edit published menus by deleting and recreating the panel.');
-    return await this.repo.removeOption(id, optionId) ?? fail('Option not found.');
+    return this.repo.lockMenu(guildId, id, async (tx, menu) => {
+      if (menu.messageId) return fail('Edit published menus by deleting and recreating the panel.');
+      return await this.repo.removeOption(id, optionId, tx) ?? fail('Option not found.');
+    });
   }
   async publish(guildId: string, id: number, channelId: string) {
-    const menu = await this.get(guildId, id);
-    if (!menu.enabled || menu.messageId) return fail('Menu disabled or already published.');
-    const guild = await this.guild(guildId);
-    const channel = await guild.channels.fetch(channelId);
-    if (!channel || channel.type !== ChannelType.GuildText) return fail('Choose a server text channel.');
-    const me = await guild.members.fetchMe();
-    if (!channel.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) return fail('Bot cannot post to this channel.');
-    const options = await this.repo.options(id);
-    for (const option of options) await this.safeRole(guild, option.roleId);
-    const message = await (channel as TextChannel).send(panel(menu, options));
-    const updated = await this.repo.update(guildId, id, { channelId, messageId: message.id });
-    if (!updated || updated.messageId !== message.id) { await message.delete().catch(() => {}); return fail('Menu changed while publishing.'); }
-    await this.notify?.(guildId, 'general', 'Role menu published', [{ name: 'Menu', value: String(id) }]);
-    return message;
+    let sent: Awaited<ReturnType<TextChannel['send']>> | undefined;
+    try {
+      await this.repo.lockMenu(guildId, id, async (tx, menu) => {
+        if (!menu.enabled || menu.messageId) return fail('Menu disabled or already published.');
+        const guild = await this.guild(guildId);
+        const channel = await guild.channels.fetch(channelId);
+        if (!channel || channel.type !== ChannelType.GuildText) return fail('Choose a server text channel.');
+        const me = await guild.members.fetchMe();
+        if (!channel.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) return fail('Bot cannot post to this channel.');
+        const options = await this.repo.options(id, tx);
+        for (const option of options) await this.safeRole(guild, option.roleId, tx);
+        sent = await (channel as TextChannel).send(panel(menu, options));
+        const updated = await this.repo.update(guildId, id, { channelId, messageId: sent.id }, tx);
+        if (!updated || updated.messageId !== sent.id) return fail('Menu changed while publishing.');
+      });
+    } catch (error) {
+      if (sent) {
+        try { await sent.delete(); }
+        catch (cleanupError) {
+          try { await this.notify?.(guildId, 'security', 'Role menu publish cleanup failed', [
+            { name: 'Menu ID', value: String(id) }, { name: 'Channel ID', value: channelId },
+            { name: 'Message ID', value: sent.id }, { name: 'Error type', value: cleanupError instanceof Error ? cleanupError.name : 'unknown' },
+          ]); } catch { /* Original publish failure remains authoritative. */ }
+        }
+      }
+      throw error;
+    }
+    try { await this.notify?.(guildId, 'general', 'Role menu published', [{ name: 'Menu', value: String(id) }]); }
+    catch { /* Optional logging cannot undo a committed publication. */ }
+    return sent!;
   }
   async delete(guildId: string, id: number) {
-    const menu = await this.get(guildId, id);
-    await this.repo.delete(guildId, id);
+    const menu = await this.repo.lockMenu(guildId, id, async (tx, current) => {
+      await this.repo.delete(guildId, id, tx);
+      return current;
+    });
     if (menu.channelId && menu.messageId) {
       const channel = await (await this.guild(guildId)).channels.fetch(menu.channelId).catch(() => null);
       if (channel?.isTextBased()) await channel.messages.fetch(menu.messageId).then(message => message.delete()).catch(() => {});

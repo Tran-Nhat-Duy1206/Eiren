@@ -1,5 +1,6 @@
 import { and, eq, asc, sql } from 'drizzle-orm';
 import type { Database } from '../../core/database/connection.js';
+import { AppError } from '../../core/errors/errors.js';
 import { roleMenus, roleMenuOptions, guildPermissionRoles } from '../../core/database/schema.js';
 
 export type RoleMenu = typeof roleMenus.$inferSelect;
@@ -17,21 +18,28 @@ export class RoleMenuRepository {
   }
   list(guildId: string) { return this.db.select().from(roleMenus).where(eq(roleMenus.guildId, guildId)).orderBy(asc(roleMenus.id)); }
   options(id: number, tx?: RoleMenuTransaction) { return (tx ?? this.db).select().from(roleMenuOptions).where(eq(roleMenuOptions.menuId, id)).orderBy(asc(roleMenuOptions.position), asc(roleMenuOptions.id)); }
-  async update(guildId: string, id: number, patch: Partial<typeof roleMenus.$inferInsert>) {
-    const [menu] = await this.db.update(roleMenus).set({ ...patch, updatedAt: new Date() })
+  async lockMenu<T>(guildId: string, id: number, work: (tx: RoleMenuTransaction, menu: RoleMenu) => Promise<T>): Promise<T> {
+    return this.db.transaction(async tx => {
+      const [menu] = await tx.select().from(roleMenus).where(and(eq(roleMenus.guildId, guildId), eq(roleMenus.id, id))).for('update');
+      if (!menu) throw new AppError('NOT_FOUND', 'Role menu not found.');
+      return work(tx, menu);
+    });
+  }
+  async update(guildId: string, id: number, patch: Partial<typeof roleMenus.$inferInsert>, tx?: RoleMenuTransaction) {
+    const [menu] = await (tx ?? this.db).update(roleMenus).set({ ...patch, updatedAt: new Date() })
       .where(and(eq(roleMenus.guildId, guildId), eq(roleMenus.id, id))).returning();
     return menu;
   }
-  async delete(guildId: string, id: number) {
-    const [menu] = await this.db.delete(roleMenus).where(and(eq(roleMenus.guildId, guildId), eq(roleMenus.id, id))).returning();
+  async delete(guildId: string, id: number, tx?: RoleMenuTransaction) {
+    const [menu] = await (tx ?? this.db).delete(roleMenus).where(and(eq(roleMenus.guildId, guildId), eq(roleMenus.id, id))).returning();
     return menu;
   }
-  async addOption(values: typeof roleMenuOptions.$inferInsert) {
-    const [option] = await this.db.insert(roleMenuOptions).values(values).returning();
+  async addOption(values: typeof roleMenuOptions.$inferInsert, tx?: RoleMenuTransaction) {
+    const [option] = await (tx ?? this.db).insert(roleMenuOptions).values(values).returning();
     return option!;
   }
-  async removeOption(menuId: number, id: number) {
-    const [option] = await this.db.delete(roleMenuOptions).where(and(eq(roleMenuOptions.menuId, menuId), eq(roleMenuOptions.id, id))).returning();
+  async removeOption(menuId: number, id: number, tx?: RoleMenuTransaction) {
+    const [option] = await (tx ?? this.db).delete(roleMenuOptions).where(and(eq(roleMenuOptions.menuId, menuId), eq(roleMenuOptions.id, id))).returning();
     return option;
   }
   async isPermissionRole(guildId: string, roleId: string, tx?: RoleMenuTransaction) {
