@@ -2,7 +2,8 @@
 
 ## Automated verified
 
-- `pnpm typecheck`, `pnpm test` (**70 passing tests across 8 files**), `pnpm build` and `pnpm db:check` passed after the V2 integration fixes. Tests cover permission mappings, module dependencies and event/button dispatcher gating, verification join/approval/rejection/account-age/rules acknowledgement/role failures, duplicate button races, anti-raid burst and young-account scoring, emergency persistence, metadata-only spam/mention scoring, and V0/V1 regressions.
+- `pnpm typecheck`, `pnpm test` (**76 passing tests across 8 files**), `pnpm build` and `pnpm db:check` passed after the V2 integration fixes. Tests cover permission mappings, module dependencies and event/button dispatcher gating, verification join/approval/rejection/account-age/rules acknowledgement/role failures, duplicate button races, anti-raid burst and young-account scoring, emergency persistence, metadata-only spam/mention scoring, and V0/V1 regressions.
+- Final PR review added regression coverage for emergency review arriving before/after a button click, concurrent join-handler ordering, duplicate joins after staff approval, revoking verified access on message suspicion, and rejecting anti-raid activation without a configured alert destination. These are automated checks, **not** new live Discord observations.
 - Message Content intent is neither requested nor used. V2 records timestamps, mention counts and short signal names; no full message text or external-link text is stored.
 
 ## Real PostgreSQL verified

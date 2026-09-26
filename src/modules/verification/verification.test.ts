@@ -87,7 +87,7 @@ class FakeVerificationRepository {
 function permissions(level = 'ADMIN') {
   return new PermissionService({ getRoleLevels: async (_guild, roles) => roles.length ? [level] : [] });
 }
-function fixture(level = 'ADMIN') {
+function fixture(level = 'ADMIN', emergencyActive?: (guildId: string) => Promise<boolean>) {
   const repository = new FakeVerificationRepository();
   const applied: string[] = [];
   const gateway: VerificationGateway = {
@@ -97,6 +97,7 @@ function fixture(level = 'ADMIN') {
       return { id: roleId, name: `role-${roleId}` };
     }),
     applyQuarantine: vi.fn(async (memberId: string, roleId: string) => { applied.push(`quarantine:${memberId}:${roleId}`); }),
+    removeVerifiedRole: vi.fn(async (memberId: string, roleId: string) => { applied.push(`remove-verified:${memberId}:${roleId}`); }),
     completeVerification: vi.fn(async (memberId: string, role: string, quarantine: string | null) => {
       applied.push(`verify:${memberId}:${role}`);
       if (quarantine) applied.push(`unquarantine:${memberId}:${quarantine}`);
@@ -108,7 +109,7 @@ function fixture(level = 'ADMIN') {
   const notify = vi.fn(async () => {});
   const logger = { warn: vi.fn(), error: vi.fn() } as unknown as Logger;
   const service = new VerificationService(repository as unknown as VerificationRepository,
-    permissions(level), logger, async () => gateway, notify);
+    permissions(level), logger, async () => gateway, notify, emergencyActive);
   return { service, repository, gateway, applied, notify, logger };
 }
 
@@ -344,6 +345,60 @@ describe('verification security regressions', () => {
     await expect(service.acknowledgeRules(guildId, userId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect((await service.handleJoin({ guildId, userId, joinedAt: new Date(), accountCreatedAt: null })).status).toBe('PENDING');
     expect((await repository.getMember(guildId, userId))?.rulesAcknowledgedAt).toBeNull();
+  });
+});
+
+describe('emergency review interleavings', () => {
+  it('preserves a review marker installed before the verification join event', async () => {
+    const { service, repository, gateway } = fixture();
+    await service.setEnabled(owner, true);
+    const joinedAt = new Date(Date.now() - 1000);
+    await service.markManualReview(guildId, userId, 'emergency_mode', joinedAt);
+    await service.handleJoin({ guildId, userId, joinedAt, accountCreatedAt: new Date(Date.now() - 86400000) });
+    expect((await repository.getMember(guildId, userId))?.metadata.requiresManualReview).toBe(true);
+    await expect(service.verifyWithButton({ guildId, userId, accountCreatedAt: new Date(Date.now() - 86400000) }))
+      .rejects.toMatchObject({ code: 'DISABLED' });
+    expect(gateway.completeVerification).not.toHaveBeenCalled();
+  });
+  it('revokes a button verification when emergency review arrives afterwards', async () => {
+    const { service, repository, applied } = fixture();
+    await service.setEnabled(owner, true);
+    const joinedAt = new Date(Date.now() - 1000);
+    await service.handleJoin({ guildId, userId, joinedAt, accountCreatedAt: new Date(Date.now() - 86400000) });
+    await service.verifyWithButton({ guildId, userId, accountCreatedAt: new Date(Date.now() - 86400000) });
+    await service.markManualReview(guildId, userId, 'emergency_mode', joinedAt);
+    expect(applied).toContain(`remove-verified:${userId}:${verifiedRoleId}`);
+    expect((await repository.getMember(guildId, userId))?.status).toBe('PENDING');
+    await expect(service.verifyWithButton({ guildId, userId, accountCreatedAt: null })).rejects.toMatchObject({ code: 'DISABLED' });
+  });
+  it('checks persisted emergency mode before granting the verified role', async () => {
+    const { service, repository, gateway } = fixture('ADMIN', async () => true);
+    await service.setEnabled(owner, true);
+    await service.handleJoin({ guildId, userId, joinedAt: new Date(), accountCreatedAt: new Date() });
+    await expect(service.verifyWithButton({ guildId, userId, accountCreatedAt: new Date() })).rejects.toMatchObject({ code: 'DISABLED' });
+    expect((await repository.getMember(guildId, userId))?.metadata.requiresManualReview).toBe(true);
+    expect(gateway.completeVerification).not.toHaveBeenCalled();
+  });
+  it('ignores a delayed duplicate join after staff approval', async () => {
+    const { service, repository, gateway } = fixture();
+    await service.setEnabled(owner, true);
+    const joinedAt = new Date(Date.now() - 1000);
+    await service.handleJoin({ guildId, userId, joinedAt, accountCreatedAt: new Date() });
+    await service.approve(moderator, userId);
+    vi.mocked(gateway.applyQuarantine).mockClear();
+    await service.markManualReview(guildId, userId, 'emergency_mode', joinedAt);
+    expect(await service.quarantineForRaid(guildId, userId, 'join_burst', 'join')).toBe(false);
+    expect(gateway.applyQuarantine).not.toHaveBeenCalled();
+    expect((await repository.getMember(guildId, userId))?.status).toBe('VERIFIED');
+  });
+  it('revokes verified access on message-triggered quarantine', async () => {
+    const { service, repository, applied } = fixture();
+    await service.setEnabled(owner, true);
+    await service.handleJoin({ guildId, userId, joinedAt: new Date(), accountCreatedAt: new Date() });
+    await service.verifyWithButton({ guildId, userId, accountCreatedAt: new Date() });
+    expect(await service.quarantineForRaid(guildId, userId, 'message_spam', 'message')).toBe(true);
+    expect(applied).toContain(`remove-verified:${userId}:${verifiedRoleId}`);
+    expect((await repository.getMember(guildId, userId))?.status).toBe('PENDING');
   });
 });
 

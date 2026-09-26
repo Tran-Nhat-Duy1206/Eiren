@@ -55,11 +55,20 @@ const verificationGatewayForGuild = async (guildId: string) => {
   if (!client.user) throw new Error('Bot not logged in');
   return new DiscordVerificationGateway(guild, client.user.id);
 };
-const verification = new VerificationService(new VerificationRepository(db), permissions, logger,
-  verificationGatewayForGuild, notifier);
 const antiRaidRepository = new AntiRaidRepository(db);
+const verification = new VerificationService(new VerificationRepository(db), permissions, logger,
+  verificationGatewayForGuild, notifier, async guildId => {
+    if (!await modules.isEnabled(guildId, 'antiraid')) return false;
+    const settings = await antiRaidRepository.getSettings(guildId);
+    return settings?.enabled === true && settings.emergencyMode;
+  });
 const antiraid = new AntiRaidService(antiRaidRepository, permissions, logger, notifier,
-  verification, { sendTo: (guildId, channelId, category, title, fields) => guildLogs.sendTo(guildId, channelId, category, title, fields) });
+  verification, { sendTo: (guildId, channelId, category, title, fields) => guildLogs.sendTo(guildId, channelId, category, title, fields) },
+  undefined, async guildId => {
+    if (!await modules.isEnabled(guildId, 'logging')) return false;
+    const settings = await guildConfig.get(guildId);
+    return Boolean(settings?.securityLogChannelId);
+  });
 const services = { logger, repository, guildConfig, permissions, modules, guildLogs, moderation, verification, antiraid };
 const scheduler = new ModerationScheduler(moderation, async guildId => {
   const guild = await client.guilds.fetch(guildId);

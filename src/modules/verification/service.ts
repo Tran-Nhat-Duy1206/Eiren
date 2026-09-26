@@ -40,6 +40,7 @@ export class VerificationService {
     private readonly logger: Logger,
     private readonly gatewayForGuild: (guildId: string) => Promise<VerificationGateway>,
     private readonly notify?: GuildLogNotifier,
+    private readonly emergencyActive?: (guildId: string) => Promise<boolean>,
   ) {}
 
   private async require(actor: Actor, level: PermissionLevel) { await this.permissions.require(actor, level); }
@@ -128,6 +129,9 @@ export class VerificationService {
 
   /** Join handling is best-effort per step: a missing role must never crash the join or lose the pending row. */
   async handleJoin(input: VerificationJoinInput): Promise<VerificationJoinOutcome> {
+    return this.serializeMember(input.guildId, input.userId, () => this.handleJoinLocked(input));
+  }
+  private async handleJoinLocked(input: VerificationJoinInput): Promise<VerificationJoinOutcome> {
     const settings = await this.repository.ensureSettings(input.guildId);
     if (!settings.enabled) return { status: 'DISABLED', quarantined: false };
     const row = await this.repository.resetForRejoin(input.guildId, input.userId, input.joinedAt, input.accountCreatedAt);
@@ -176,6 +180,11 @@ export class VerificationService {
     const row = await this.repository.upsertPending(input.guildId, input.userId, input.accountCreatedAt);
     if (row.status === 'VERIFIED' || row.status === 'BYPASSED') return { status: row.status, alreadyVerified: true };
     if (row.status === 'REJECTED') throw new AppError('PERMISSION', 'Your verification was rejected. Please contact staff.');
+    if (await this.emergencyActive?.(input.guildId)) {
+      await this.repository.mergeMetadata(input.guildId, input.userId,
+        { requiresManualReview: true, manualReviewReason: 'emergency_mode' });
+      throw new AppError('DISABLED', 'Staff review is required during emergency mode. Please wait for a moderator.');
+    }
     if (row.metadata.requiresManualReview === true)
       throw new AppError('DISABLED', 'Staff review is required for new accounts right now. Please wait for a moderator.');
     if (settings.requireRulesAck && !row.rulesAcknowledgedAt)
@@ -250,15 +259,50 @@ export class VerificationService {
   }
 
   /** Called by anti-raid when emergency mode requires staff approval for a member. */
-  async markManualReview(guildId: string, userId: string, reason: string) {
+  async markManualReview(guildId: string, userId: string, reason: string, joinedAt?: Date) {
     if (!snowflake.test(guildId) || !snowflake.test(userId)) return;
-    await this.repository.upsertPending(guildId, userId, null);
-    await this.repository.mergeMetadata(guildId, userId, { requiresManualReview: true, manualReviewReason: reason });
+    await this.serializeMember(guildId, userId, async () => {
+      const row = joinedAt
+        ? await this.repository.resetForRejoin(guildId, userId, joinedAt, null)
+        : await this.repository.upsertPending(guildId, userId, null);
+      if (row.status === 'VERIFIED' && row.method === 'MANUAL') return;
+      await this.repository.mergeMetadata(guildId, userId, { requiresManualReview: true, manualReviewReason: reason });
+      if (row.status === 'VERIFIED' || row.status === 'BYPASSED')
+        await this.restrictVerifiedMember(guildId, userId, row.status);
+    });
+  }
+
+  private async restrictVerifiedMember(guildId: string, userId: string, status: VerificationStatus) {
+    try {
+      const settings = await this.repository.ensureSettings(guildId);
+      if (!settings.quarantineRoleId || !settings.verifiedRoleId)
+        throw new AppError('VALIDATION', 'Verification roles are not configured for emergency review.');
+      const gateway = await this.gatewayForGuild(guildId);
+      await gateway.assertRoleUsable(settings.quarantineRoleId);
+      await gateway.assertRoleUsable(settings.verifiedRoleId);
+      await gateway.applyQuarantine(userId, settings.quarantineRoleId);
+      await gateway.removeVerifiedRole(userId, settings.verifiedRoleId);
+      const updated = await this.repository.transition(guildId, userId, [status], 'PENDING', {
+        method: null, verifiedAt: null, verifiedBy: null, rulesAcknowledgedAt: null,
+      });
+      if (!updated) throw new AppError('CONFLICT', 'Verification state changed during emergency restriction.');
+    } catch (error) {
+      this.logger.warn({ guildId, userId, errorType: error instanceof Error ? error.name : 'unknown' },
+        'Emergency review could not reconcile verification roles; manual intervention required');
+      await this.reportConfigProblem(guildId, 'emergency verification review', error);
+    }
   }
 
   /** Called by anti-raid; returns false when quarantine could not be applied. */
-  async quarantineForRaid(guildId: string, userId: string, reason: string) {
+  async quarantineForRaid(guildId: string, userId: string, reason: string, source: 'join' | 'message' = 'join') {
     if (!snowflake.test(guildId) || !snowflake.test(userId)) return false;
+    return this.serializeMember(guildId, userId, () => this.quarantineForRaidLocked(guildId, userId, reason, source));
+  }
+  private async quarantineForRaidLocked(guildId: string, userId: string, reason: string, source: 'join' | 'message') {
+    // A delayed duplicate join must not re-quarantine a member already approved
+    // for this membership epoch. Message-based abuse is handled separately.
+    const existing = await this.repository.getMember(guildId, userId);
+    if (source === 'join' && (existing?.status === 'VERIFIED' || existing?.status === 'BYPASSED')) return false;
     const settings = await this.repository.ensureSettings(guildId);
     if (!settings.quarantineRoleId) {
       this.logger.warn({ guildId }, 'Anti-raid quarantine requested without a configured quarantine role');
@@ -270,8 +314,13 @@ export class VerificationService {
       const gateway = await this.gatewayForGuild(guildId);
       await gateway.assertRoleUsable(settings.quarantineRoleId);
       await gateway.applyQuarantine(userId, settings.quarantineRoleId);
-      await this.repository.upsertPending(guildId, userId, null);
-      await this.repository.mergeMetadata(guildId, userId, { raidQuarantined: true, raidReason: reason });
+      const row = await this.repository.upsertPending(guildId, userId, null);
+      await this.repository.mergeMetadata(guildId, userId, { raidQuarantined: true, raidReason: reason,
+        ...(source === 'message' ? { requiresManualReview: true, manualReviewReason: reason } : {}) });
+      if (source === 'message' && (row.status === 'VERIFIED' || row.status === 'BYPASSED')) {
+        await this.restrictVerifiedMember(guildId, userId, row.status);
+        return (await this.repository.getMember(guildId, userId))?.status === 'PENDING';
+      }
       return true;
     } catch (error) {
       await this.reportConfigProblem(guildId, 'anti-raid quarantine', error);

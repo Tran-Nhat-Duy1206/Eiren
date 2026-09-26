@@ -14,8 +14,8 @@ export const MESSAGE_SPAM_POINTS = 40;
 export const MASS_MENTION_POINTS = 30;
 
 export interface RaidVerificationPort {
-  quarantineForRaid(guildId: string, userId: string, reason: string): Promise<boolean>;
-  markManualReview(guildId: string, userId: string, reason: string): Promise<void>;
+  quarantineForRaid(guildId: string, userId: string, reason: string, source?: 'join' | 'message'): Promise<boolean>;
+  markManualReview(guildId: string, userId: string, reason: string, joinedAt?: Date): Promise<void>;
 }
 export interface RaidAlertSink {
   sendTo(guildId: string, channelId: string, category: LogCategory, title: string, fields?: readonly LogField[]): Promise<void>;
@@ -86,6 +86,7 @@ export class AntiRaidService {
     private readonly verification?: RaidVerificationPort,
     private readonly alertSink?: RaidAlertSink,
     private readonly tracker: MessageActivityTracker = new MessageActivityTracker(),
+    private readonly hasSecurityLogDestination: (guildId: string) => Promise<boolean> = async () => false,
   ) {}
 
   private async require(actor: Actor, level: PermissionLevel) { await this.permissions.require(actor, level); }
@@ -96,10 +97,12 @@ export class AntiRaidService {
   }
   async setEnabled(actor: Actor, enabled: boolean) {
     await this.require(actor, 'ADMIN');
-    const updated = await this.repository.updateSettings(actor.guildId, { enabled }, actor.userId);
-    if (enabled && !updated.alertChannelId)
-      this.logger.warn({ guildId: actor.guildId }, 'Anti-raid enabled without explicit alert channel; verify security logging is configured');
-    return updated;
+    if (enabled) {
+      const settings = await this.repository.ensureSettings(actor.guildId);
+      if (!settings.alertChannelId && !await this.hasSecurityLogDestination(actor.guildId))
+        throw new AppError('VALIDATION', 'Configure an anti-raid alert channel or enable security logging before enabling anti-raid.');
+    }
+    return this.repository.updateSettings(actor.guildId, { enabled }, actor.userId);
   }
   async configure(actor: Actor, field: string, value: string) {
     await this.require(actor, 'ADMIN');
@@ -143,18 +146,20 @@ export class AntiRaidService {
     const emergencyActivated = decision.emergencyActivated;
     const signals = decision.record?.signals ?? [];
     const riskScore = decision.record?.riskScore ?? 0;
+    // Establish the review gate before alert delivery or Discord role operations can yield.
+    if (emergency || emergencyActivated)
+      await this.verification?.markManualReview(input.guildId, input.userId, 'emergency_mode', input.joinedAt);
     if (decision.duplicate) {
       // Role application and metadata writes are idempotent: retry after a partial failure.
       const quarantineKey = `${input.guildId}:${input.userId}`;
       if (current.autoQuarantine && this.verification && (signals.includes('join_burst') || emergency)
         && !this.recentlyQuarantined(quarantineKey, Date.now())) {
         try {
-          if (await this.verification.quarantineForRaid(input.guildId, input.userId, signals.join(', ') || 'raid_suspicion'))
+          if (await this.verification.quarantineForRaid(input.guildId, input.userId, signals.join(', ') || 'raid_suspicion', 'join'))
             this.rememberQuarantine(quarantineKey, Date.now());
         }
         catch (error) { this.logger.warn({ guildId: input.guildId, errorType: error instanceof Error ? error.name : 'unknown' }, 'Anti-raid quarantine retry failed'); }
       }
-      if (emergency) await this.verification?.markManualReview(input.guildId, input.userId, 'emergency_mode');
       return { enabled: true, duplicate: true, riskScore, signals, joinCount, youngAccount, burst,
         emergency, emergencyActivated: false, quarantined: false, alerted: false };
     }
@@ -169,7 +174,7 @@ export class AntiRaidService {
     let quarantined = false;
     if (settings.autoQuarantine && this.verification && (burst || emergency || suspiciousYoung)) {
       try {
-        quarantined = await this.verification.quarantineForRaid(input.guildId, input.userId, signals.join(', ') || 'raid_suspicion');
+        quarantined = await this.verification.quarantineForRaid(input.guildId, input.userId, signals.join(', ') || 'raid_suspicion', 'join');
         if (quarantined) this.rememberQuarantine(`${input.guildId}:${input.userId}`, Date.now());
       } catch (error) {
         this.logger.warn({ guildId: input.guildId, errorType: error instanceof Error ? error.name : 'unknown' }, 'Anti-raid quarantine failed');
@@ -191,9 +196,6 @@ export class AntiRaidService {
         { name: 'Risk score', value: String(riskScore) },
       ]);
       alerted = true;
-    }
-    if (emergency || emergencyActivated) {
-      await this.verification?.markManualReview(input.guildId, input.userId, 'emergency_mode');
     }
     return { enabled: true, riskScore, signals, joinCount, youngAccount, burst, emergency,
       emergencyActivated, quarantined, alerted };
@@ -220,7 +222,7 @@ export class AntiRaidService {
     const quarantineKey = `${input.guildId}:${input.userId}`;
     if (settings.autoQuarantine && this.verification && !this.recentlyQuarantined(quarantineKey, Date.now())) {
       try {
-        quarantined = await this.verification.quarantineForRaid(input.guildId, input.userId, signals.join(', '));
+        quarantined = await this.verification.quarantineForRaid(input.guildId, input.userId, signals.join(', '), 'message');
         if (quarantined) this.rememberQuarantine(quarantineKey, Date.now());
       } catch (error) {
         this.logger.warn({ guildId: input.guildId, errorType: error instanceof Error ? error.name : 'unknown' }, 'Anti-raid quarantine failed');

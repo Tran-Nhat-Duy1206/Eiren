@@ -88,7 +88,7 @@ class FakeAntiRaidRepository {
 function permissions(level = 'ADMIN') {
   return new PermissionService({ getRoleLevels: async (_guild, roles) => roles.length ? [level] : [] });
 }
-function fixture(level = 'ADMIN') {
+function fixture(level = 'ADMIN', hasSecurityLogDestination: (guildId: string) => Promise<boolean> = async () => true) {
   const repository = new FakeAntiRaidRepository();
   const quarantineForRaid = vi.fn(async () => true);
   const markManualReview = vi.fn(async () => {});
@@ -99,7 +99,7 @@ function fixture(level = 'ADMIN') {
   const logger = { warn: vi.fn(), error: vi.fn() } as unknown as Logger;
   const tracker = new MessageActivityTracker();
   const service = new AntiRaidService(repository as unknown as AntiRaidRepository, permissions(level), logger,
-    notify, verification, alertSink, tracker);
+    notify, verification, alertSink, tracker, hasSecurityLogDestination);
   return { service, repository, verification, notify, sendTo, tracker, quarantineForRaid, markManualReview };
 }
 async function enable(service: AntiRaidService, patch: Partial<AntiRaidSettings> = {}) {
@@ -140,15 +140,18 @@ describe('anti-raid join scoring', () => {
     await service.handleJoin({ guildId, userId: '10000000000000001', joinedAt: new Date(base), accountCreatedAt: oldAccount() });
     const second = await service.handleJoin({ guildId, userId: '10000000000000002', joinedAt: new Date(base + 1000), accountCreatedAt: oldAccount() });
     expect(second.burst).toBe(false);
-    const third = await service.handleJoin({ guildId, userId: '10000000000000003', joinedAt: new Date(base + 2000), accountCreatedAt: youngAccount() });
+    const thirdJoinedAt = new Date(base + 2000);
+    const third = await service.handleJoin({ guildId, userId: '10000000000000003', joinedAt: thirdJoinedAt, accountCreatedAt: youngAccount() });
     expect(third).toMatchObject({ burst: true, emergencyActivated: true, quarantined: true });
     expect(third.signals).toEqual(['join_burst', 'young_account']);
     expect(repository.settings.get(guildId)?.emergencyMode).toBe(true);
     expect(repository.settings.get(guildId)?.emergencyActorId).toBe('SYSTEM');
     expect(repository.settings.get(guildId)?.emergencyReason).toBe('join_burst');
     expect(repository.settings.get(guildId)?.emergencyJoinCount).toBe(3);
-    expect(quarantineForRaid).toHaveBeenCalledWith(guildId, '10000000000000003', expect.stringContaining('join_burst'));
-    expect(markManualReview).toHaveBeenCalledWith(guildId, '10000000000000003', 'emergency_mode');
+    expect(quarantineForRaid).toHaveBeenCalledWith(guildId, '10000000000000003', expect.stringContaining('join_burst'), 'join');
+    expect(markManualReview).toHaveBeenCalledWith(guildId, '10000000000000003', 'emergency_mode', thirdJoinedAt);
+    expect(markManualReview.mock.invocationCallOrder[0]!).toBeLessThan(quarantineForRaid.mock.invocationCallOrder[0]!);
+    expect(markManualReview.mock.invocationCallOrder[0]!).toBeLessThan(sendTo.mock.invocationCallOrder[0]!);
     expect(notify).toHaveBeenCalledWith(guildId, 'security', 'Emergency mode activated: join burst', expect.anything());
     expect(notify).toHaveBeenCalledWith(guildId, 'security', 'Member auto-quarantined', expect.anything(), expect.anything());
     expect(sendTo).toHaveBeenCalledWith(guildId, '92345678901234567', 'security', expect.stringContaining('Emergency mode activated'), expect.anything());
@@ -177,10 +180,19 @@ describe('anti-raid join scoring', () => {
     expect(repository.settings.get(guildId)?.emergencyActivatedAt).toBeInstanceOf(Date);
     expect(quarantineForRaid).toHaveBeenCalledTimes(2); // replay repairs the first join after emergency activation
     expect(markManualReview).toHaveBeenCalledTimes(2);
+    expect(markManualReview).toHaveBeenNthCalledWith(2, guildId, userId, 'emergency_mode', joinedAt);
+    expect(markManualReview.mock.invocationCallOrder[1]!).toBeLessThan(quarantineForRaid.mock.invocationCallOrder[1]!);
   });
 });
 
 describe('anti-raid configuration and emergency mode', () => {
+  it('rejects activation without an alert destination without enabling the module setting', async () => {
+    const { service, repository } = fixture('ADMIN', async () => false);
+    await expect(service.setEnabled(owner, true)).rejects.toMatchObject({ code: 'VALIDATION' });
+    expect(repository.settings.get(guildId)?.enabled).toBe(false);
+    await service.configure(owner, 'alert_channel', '92345678901234567');
+    await expect(service.setEnabled(owner, true)).resolves.toMatchObject({ enabled: true });
+  });
   it('validates and persists configuration with ADMIN permission', async () => {
     const { service } = fixture('ADMIN');
     await enable(service);
@@ -227,7 +239,7 @@ describe('anti-raid message metadata signals', () => {
     const third = await service.handleMessage({ guildId, userId, messageId: 'm3', at: base + 2000, mentionCount: 0 });
     expect(third).toMatchObject({ spam: true, alerted: true, quarantined: true });
     expect(third.signals).toEqual(['message_spam']);
-    expect(quarantineForRaid).toHaveBeenCalledWith(guildId, userId, 'message_spam');
+    expect(quarantineForRaid).toHaveBeenCalledWith(guildId, userId, 'message_spam', 'message');
     expect(notify).toHaveBeenCalledWith(guildId, 'security', 'Suspicious message activity', expect.anything());
     const duplicate = await service.handleMessage({ guildId, userId, messageId: 'm3', at: base + 2500, mentionCount: 0 });
     expect(duplicate.duplicate).toBe(true);

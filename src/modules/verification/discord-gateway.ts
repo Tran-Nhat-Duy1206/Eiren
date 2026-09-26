@@ -9,6 +9,7 @@ export interface PanelMessage { embeds: EmbedBuilder[]; components: ActionRowBui
 export interface VerificationGateway {
   assertRoleUsable(roleId: string): Promise<{ id: string; name: string }>;
   applyQuarantine(memberId: string, roleId: string): Promise<void>;
+  removeVerifiedRole(memberId: string, roleId: string): Promise<void>;
   completeVerification(memberId: string, verifiedRoleId: string, quarantineRoleId: string | null): Promise<{ quarantineRemoved: boolean }>;
   memberExists(memberId: string): Promise<boolean>;
   sendPanel(channelId: string, panel: PanelMessage): Promise<string>;
@@ -47,6 +48,11 @@ export class DiscordVerificationGateway implements VerificationGateway {
     const member = await this.requireMember(memberId, 'quarantine');
     if (member.roles.cache.has(roleId)) return;
     await member.roles.add(roleId, 'Eiren verification quarantine');
+  }
+  async removeVerifiedRole(memberId: string, roleId: string) {
+    const member = await this.requireMember(memberId, 'emergency review');
+    if (member.roles.cache.has(roleId))
+      await member.roles.remove(roleId, 'Eiren emergency review');
   }
   async completeVerification(memberId: string, verifiedRoleId: string, quarantineRoleId: string | null) {
     const member = await this.requireMember(memberId, 'verification');
