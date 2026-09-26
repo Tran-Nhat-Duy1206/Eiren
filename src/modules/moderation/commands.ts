@@ -6,18 +6,14 @@ import type { Services } from '../../app/services.js';
 import { DiscordModerationGateway } from './discord-gateway.js';
 import type { ModerationAction } from './repository.js';
 
+export { parseDuration } from '../../core/time/duration.js';
+import { parseDuration } from '../../core/time/duration.js';
+
 const levels: Record<string, PermissionLevel> = {
   warn: 'MODERATOR', timeout: 'MODERATOR', kick: 'MODERATOR', ban: 'SENIOR_MODERATOR',
   tempban: 'SENIOR_MODERATOR', unban: 'SENIOR_MODERATOR', purge: 'MODERATOR',
   note: 'MODERATOR', history: 'MODERATOR', case: 'MODERATOR',
 };
-export function parseDuration(value: string): number {
-  const match = /^(\d{1,4})(m|h|d)$/i.exec(value.trim());
-  if (!match) throw new AppError('VALIDATION', 'Use a duration such as 30m, 2h, or 1d.');
-  const seconds = Number(match[1]) * ({ m: 60, h: 3600, d: 86400 }[match[2]!.toLowerCase()] ?? 0);
-  if (!Number.isSafeInteger(seconds) || seconds < 60) throw new AppError('VALIDATION', 'Invalid duration.');
-  return seconds;
-}
 async function actorFor(interaction: ChatInputCommandInteraction): Promise<Actor> {
   if (!interaction.guild) throw new AppError('VALIDATION', 'Use this in a server.');
   const member = await interaction.guild.members.fetch(interaction.user.id);

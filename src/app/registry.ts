@@ -1,15 +1,22 @@
 import type { Command } from '../core/commands/command.js';
 import type { BotEvent } from '../core/events/event.js';
+import type { ButtonHandler } from '../core/components/component.js';
 import type { ModuleDefinition } from '../services/module-service.js';
 import { coreCommands } from '../modules/core/commands.js';
 import { coreEvents } from '../modules/core/events.js';
 import { loggingEvents } from '../modules/logging/events.js';
 import { moderationCommands } from '../modules/moderation/commands.js';
+import { antiraidCommands } from '../modules/antiraid/commands.js';
+import { antiraidEvents } from '../modules/antiraid/events.js';
+import { verificationButtons } from '../modules/verification/components.js';
+import { verificationCommands } from '../modules/verification/commands.js';
+import { verificationEvents } from '../modules/verification/events.js';
 
 export interface ModuleManifest {
   definition: ModuleDefinition;
   commands: readonly Command[];
   events: readonly BotEvent[];
+  components?: readonly ButtonHandler[];
 }
 
 // New production modules contribute a manifest here; neither dispatcher needs editing.
@@ -17,10 +24,13 @@ export const manifests: readonly ModuleManifest[] = [
   { definition: { key: 'core', defaultEnabled: true }, commands: coreCommands, events: coreEvents },
   { definition: { key: 'moderation', defaultEnabled: false }, commands: moderationCommands, events: [] },
   { definition: { key: 'logging', defaultEnabled: false }, commands: [], events: loggingEvents },
+  { definition: { key: 'verification', defaultEnabled: false }, commands: verificationCommands, events: verificationEvents, components: verificationButtons },
+  { definition: { key: 'antiraid', defaultEnabled: false, dependencies: ['verification'] }, commands: antiraidCommands, events: antiraidEvents },
 ];
 
 export function buildRegistry(modules: readonly ModuleManifest[]) {
   const commands = new Map<string, Command>();
+  const components = new Map<string, ButtonHandler>();
   const events: BotEvent[] = [];
   const keys = new Set<string>();
   for (const module of modules) {
@@ -30,6 +40,10 @@ export function buildRegistry(modules: readonly ModuleManifest[]) {
     for (const command of module.commands) {
       if (command.moduleKey !== key || commands.has(command.data.name)) throw new Error(`Invalid or duplicate command: ${command.data.name}`);
       commands.set(command.data.name, command);
+    }
+    for (const button of module.components ?? []) {
+      if (button.moduleKey !== key || components.has(button.customId)) throw new Error(`Invalid or duplicate component: ${button.customId}`);
+      components.set(button.customId, button);
     }
     for (const event of module.events) {
       if (event.moduleKey !== key) throw new Error(`Invalid event module: ${event.name}`);
@@ -53,5 +67,5 @@ export function buildRegistry(modules: readonly ModuleManifest[]) {
     visited.add(key);
   }
   for (const key of definitions.keys()) validate(key);
-  return { commands, events, definitions: modules.map(module => module.definition) };
+  return { commands, events, components, definitions: modules.map(module => module.definition) };
 }
