@@ -41,13 +41,16 @@ export class AnalyticsService {
   async recordMessage(guildId: string, messageId: string, channelId: string, at: Date, botFlag = false, systemFlag = false, webhookFlag = false) {
     if (botFlag || systemFlag || webhookFlag) return false;
     this.validate(at);
+    // Capture the pre-check epoch: a disable/re-enable cannot relabel delayed old work as new.
+    const epoch = await this.modules.voiceEpoch?.(guildId);
     if (!await this.modules.isEnabled(guildId, 'analytics')) return false;
-    return this.repository.message(guildId, messageId, channelId, at);
+    return this.repository.message(guildId, messageId, channelId, at, epoch);
   }
   async recordMember(guildId: string, userId: string, present: boolean, at: Date) {
     this.validate(at);
+    const epoch = await this.modules.voiceEpoch?.(guildId);
     if (!await this.modules.isEnabled(guildId, 'analytics')) return false;
-    return this.repository.member(guildId, userId, present, at);
+    return this.repository.member(guildId, userId, present, at, epoch);
   }
   async recordVoice(guildId: string, userId: string, channelId: string | null, at: Date) {
     this.validate(at);
@@ -67,8 +70,9 @@ export class AnalyticsService {
     this.validate(at);
     if (!Number.isSafeInteger(durationMs) || durationMs < 0 || durationMs > 86400000 || !/^[a-z0-9_-]{1,32}$/.test(commandName))
       throw new AppError('VALIDATION', 'Invalid command telemetry.');
+    const epoch = await this.modules.voiceEpoch?.(guildId);
     if (!await this.modules.isEnabled(guildId, 'analytics')) return false;
-    return this.repository.command(guildId, interactionId, commandName, failed, durationMs, at);
+    return this.repository.command(guildId, interactionId, commandName, failed, durationMs, at, epoch);
   }
   async summary(guildId: string, range: AnalyticsRange, timezone = 'UTC', now = new Date()) {
     if (!Object.hasOwn(rangeHours, range)) throw new AppError('VALIDATION', 'Choose 24h, 7d, 30d, or 90d.');

@@ -41,8 +41,16 @@ export class AnalyticsRepository {
     const inserted = await tx.insert(dedupe).values({ guildId, eventKey, createdAt: at }).onConflictDoNothing().returning({ eventKey: dedupe.eventKey });
     return inserted.length !== 0;
   }
-  async message(guildId: string, messageId: string, channelId: string, at: Date) {
+  /** The analytics toggle shares this guild lock. Reject before writing even a dedupe key. */
+  private async ingestionAllowed(tx: Parameters<Parameters<Database['transaction']>[0]>[0], guildId: string,
+    expectedEpoch?: number) {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
+    const module = await this.voiceModuleState(tx, guildId);
+    return Boolean(module?.enabled && (expectedEpoch === undefined || module.version === expectedEpoch));
+  }
+  async message(guildId: string, messageId: string, channelId: string, at: Date, expectedEpoch?: number) {
     return this.db.transaction(async tx => {
+      if (!await this.ingestionAllowed(tx, guildId, expectedEpoch)) return false;
       if (!await this.stamp(tx, guildId, `m:${messageId}`, at)) return false;
       const bucketStart = hourStart(at);
       await tx.insert(guildHour).values({ guildId, bucketStart, messages: 1 }).onConflictDoUpdate({ target: [guildHour.guildId, guildHour.bucketStart], set: { messages: sql`${guildHour.messages} + 1` } });
@@ -50,8 +58,10 @@ export class AnalyticsRepository {
       return true;
     });
   }
-  async member(guildId: string, userId: string, present: boolean, at: Date) {
+  async member(guildId: string, userId: string, present: boolean, at: Date, expectedEpoch?: number) {
     return this.db.transaction(async tx => {
+      if (!await this.ingestionAllowed(tx, guildId, expectedEpoch)) return false;
+      // Same hierarchy as voice writers: guild analytics lock, then member lock.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), hashtext(${userId}))`);
       const [prior] = await tx.select({ present: members.present }).from(members)
         .where(and(eq(members.guildId, guildId), eq(members.userId, userId)));
@@ -70,8 +80,10 @@ export class AnalyticsRepository {
       return true;
     });
   }
-  async command(guildId: string, interactionId: string, commandName: string, failed: boolean, durationMs: number, at: Date) {
+  async command(guildId: string, interactionId: string, commandName: string, failed: boolean, durationMs: number, at: Date,
+    expectedEpoch?: number) {
     return this.db.transaction(async tx => {
+      if (!await this.ingestionAllowed(tx, guildId, expectedEpoch)) return false;
       if (!await this.stamp(tx, guildId, `c:${interactionId}`, at)) return false;
       const bucketStart = hourStart(at);
       await tx.insert(commandHour).values({ guildId, commandName, bucketStart, invocations: 1, errors: Number(failed), totalDurationMs: durationMs })

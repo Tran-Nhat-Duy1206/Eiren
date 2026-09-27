@@ -24,6 +24,21 @@ describe('analytics UTC allocation and privacy boundaries', () => {
     await expect(service.recordCommand('g', 'i', 'ping', false, -1, at)).rejects.toMatchObject({ code: 'VALIDATION' });
     expect(repository.command).not.toHaveBeenCalled();
   });
+  it('passes the pre-check analytics epoch to all non-voice repository writers', async () => {
+    const message = vi.fn(async () => true);
+    const member = vi.fn(async () => true);
+    const command = vi.fn(async () => true);
+    const modules = { voiceEpoch: vi.fn(async () => 7), isEnabled: vi.fn(async () => true) } as unknown as ModuleService;
+    const service = new AnalyticsService({ message, member, command } as unknown as AnalyticsRepository,
+      {} as PermissionService, modules);
+    const at = new Date();
+    expect(await service.recordMessage('guild', 'message', 'channel', at)).toBe(true);
+    expect(await service.recordMember('guild', 'human', true, at)).toBe(true);
+    expect(await service.recordCommand('guild', 'interaction', 'ping', false, 23, at)).toBe(true);
+    expect(message).toHaveBeenCalledWith('guild', 'message', 'channel', at, 7);
+    expect(member).toHaveBeenCalledWith('guild', 'human', true, at, 7);
+    expect(command).toHaveBeenCalledWith('guild', 'interaction', 'ping', false, 23, at, 7);
+  });
   it('does not collect any gateway or command events when module is disabled', async () => {
     const repository = { message: vi.fn(), member: vi.fn(), voice: vi.fn(), command: vi.fn() } as unknown as AnalyticsRepository;
     const modules = { isEnabled: vi.fn(async () => false) } as unknown as ModuleService;
