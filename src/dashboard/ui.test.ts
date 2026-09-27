@@ -28,6 +28,15 @@ describe('dashboard server-rendered UI', () => {
       expect(rendered).not.toContain('<img');
     }
   });
+  it('links each manageable guild directly to its protected overview page', () => {
+    const picker = renderGuildPicker([{ id: '123456789012345678', name: 'Development' }, { id: '987654321098765432', name: 'Other' }]);
+    expect(picker).toContain('href="/g/123456789012345678/overview"');
+    expect(picker).toContain('href="/g/987654321098765432/overview"');
+    expect(picker).not.toMatch(/href="\/g\/\d{17,20}"/);
+    const encoded = renderGuildPicker([{ id: `x" onclick="bad()`, name: 'Hostile' }]);
+    expect(encoded).toContain('href="/g/x%22%20onclick%3D%22bad()/overview"');
+    expect(encoded).not.toMatch(/\sonclick=/i);
+  });
   it('links exactly to supported route keys and renders object read models', () => {
     for (const route of routes) {
       const html = renderPage({ ...base, page: route, analyticsEnabled: true, data: { settings: { timezone: 'UTC', secretToken: 'PRIVATE' }, items: [{ label: 'Visible', transcript: 'PRIVATE', reportBody: 'PRIVATE' }] } });

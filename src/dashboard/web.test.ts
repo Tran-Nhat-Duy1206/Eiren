@@ -7,6 +7,7 @@ const token = 'a'.repeat(64);
 const origin = 'https://dashboard.example';
 function fixture() {
   const authorize = vi.fn(async (id: string, _session?: unknown, _level?: string) => { if (id !== guildId) throw new AppError('PERMISSION', 'Guild inaccessible.'); return { guildId: id, userId: guildId, guildOwnerId: guildId, roleIds: [] }; });
+  const listAccessible = vi.fn(async () => [{ id: guildId, name: '<img src=x>' }]);
   const setEnabled = vi.fn(async () => undefined);
   const audit = vi.fn(async () => undefined);
   const auth = { startOAuth: vi.fn(() => ({ authorizationUrl: 'https://discord.com/authorize', stateCookie: { name: 'dashboard_oauth_state', value: 'state', options: { path: '/', httpOnly: true, sameSite: 'lax' as const, secure: true, maxAge: 600 } } })), completeOAuth: vi.fn(), clearStateCookie: () => ({ name: 'dashboard_oauth_state', value: '', options: { path: '/', httpOnly: true, sameSite: 'lax' as const, secure: true, maxAge: 0 } }), clearSessionCookie: () => ({ name: 'dashboard_session', value: '', options: { path: '/', httpOnly: true, sameSite: 'lax' as const, secure: true, maxAge: 0 } }), getSession: vi.fn(async (raw: string) => raw === token ? { userId: guildId, oauthGuildIds: [guildId], displayName: null, createdAt: new Date(), lastSeenAt: new Date(), expiresAt: new Date(Date.now() + 86400000), absoluteExpiresAt: new Date(Date.now() + 86400000) } : null), revokeSession: vi.fn(), csrfToken: vi.fn(() => 'csrf'), verifyCsrf: vi.fn((raw: string, submitted: string) => raw === token && submitted === 'csrf') };
@@ -16,12 +17,31 @@ function fixture() {
   const roleId = '234567890123456789';
   const guild = { id: guildId, name: 'Example', memberCount: 42, roles: { fetch: vi.fn(async () => ({ id: roleId, managed: false, editable: true, permissions: { any: vi.fn(() => false) } })) } };
   const gateway = { warn: vi.fn() };
-  const deps = { client: { guilds: { fetch: vi.fn(async () => guild) } } as never, services: services as never, auth: auth as never, access: { authorize, listAccessible: vi.fn(async () => [{ id: guildId, name: '<img src=x>' }]) } as never, read: read as never, audit: { record: audit }, analytics: { configure: mutations.retention, summary: vi.fn(async () => ({})) }, moderationGatewayForGuild: vi.fn(async () => gateway as never), secureCookies: true, baseUrl: origin };
-  return { deps, authorize, setEnabled, audit, auth, read, mutations, services, roleId, gateway, guild };
+  const deps = { client: { guilds: { fetch: vi.fn(async () => guild) } } as never, services: services as never, auth: auth as never, access: { authorize, listAccessible } as never, read: read as never, audit: { record: audit }, analytics: { configure: mutations.retention, summary: vi.fn(async () => ({})) }, moderationGatewayForGuild: vi.fn(async () => gateway as never), secureCookies: true, baseUrl: origin };
+  return { deps, authorize, listAccessible, setEnabled, audit, auth, read, mutations, services, roleId, gateway, guild };
 }
 const cookie = { cookie: `dashboard_session=${token}`, host: 'dashboard.example', origin };
 describe('dashboard HTTP boundary', () => {
   it('returns a secret-free health response and external stylesheet with restrictive CSP', async () => { const { deps } = fixture(); const app = await createDashboardServer(deps); const health = await app.inject('/healthz'); expect(health.json()).toEqual({ status: 'ok' }); const html = await app.inject('/login'); expect(html.headers['content-security-policy']).toContain("script-src 'none'"); expect(html.body).toContain('/assets/dashboard.css'); await app.close(); });
+  it('opens a guild picker link through the protected overview route without granting foreign guilds', async () => {
+    const { deps, authorize, listAccessible } = fixture();
+    const app = await createDashboardServer(deps);
+    expect((await app.inject('/guilds')).statusCode).toBe(302);
+    const picker = await app.inject({ url: '/guilds', headers: cookie });
+    expect(picker.statusCode).toBe(200);
+    const destination = picker.body.match(/href="(\/g\/\d{17,20}\/overview)"/)?.[1];
+    expect(destination).toBe(`/g/${guildId}/overview`);
+    expect((await app.inject(destination!)).statusCode).toBe(302);
+    expect((await app.inject({ url: destination!, headers: cookie })).statusCode).toBe(200);
+    expect(authorize).toHaveBeenCalledWith(guildId, expect.any(Object), 'HELPER');
+    const foreign = '999999999999999999';
+    listAccessible.mockResolvedValueOnce([{ id: foreign, name: 'Forged' }]);
+    const forgedPicker = await app.inject({ url: '/guilds', headers: cookie });
+    expect(forgedPicker.body).toContain(`/g/${foreign}/overview`);
+    expect((await app.inject({ url: `/g/${foreign}/overview`, headers: cookie })).statusCode).toBe(403);
+    expect(authorize).toHaveBeenCalledWith(foreign, expect.any(Object), 'HELPER');
+    await app.close();
+  });
   it('requires authentication and current guild authorization on every read, escaping HTML', async () => { const { deps, authorize } = fixture(); const app = await createDashboardServer(deps); expect((await app.inject(`/g/${guildId}/overview`)).statusCode).toBe(302); const response = await app.inject({ method: 'GET', url: `/g/${guildId}/overview`, headers: cookie }); expect(response.statusCode).toBe(200); expect(response.body).toContain('&lt;script&gt;'); expect(response.body).not.toContain('<script>'); expect(authorize).toHaveBeenCalledWith(guildId, expect.objectContaining({ userId: guildId, oauthGuildIds: [guildId] }), 'HELPER'); expect((await app.inject({ url: '/g/999999999999999999/overview', headers: cookie })).statusCode).toBe(403); await app.close(); });
   it('shows bounded analytics and the REST guild member count with selected IANA timezone', async () => {
     const { deps, authorize } = fixture();

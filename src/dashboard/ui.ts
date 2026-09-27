@@ -17,7 +17,7 @@ export function renderLogin(error?: string): string {
 }
 
 export function renderGuildPicker(guilds: Array<{ id: string; name: string }>, csrfToken?: string): string {
-  const entries = guilds.slice(0, 100).map(({ id, name }) => `<li><a href="${escapeHtml(path(String(id)))}">${escapeHtml(name)} <span class="muted">Open dashboard</span></a></li>`).join('');
+  const entries = guilds.slice(0, 100).map(({ id, name }) => `<li><a href="${escapeHtml(`${path(String(id))}/overview`)}">${escapeHtml(name)} <span class="muted">Open dashboard</span></a></li>`).join('');
   return layout('Choose a server', `<section class="panel"><h1>Choose a server</h1>${guilds.length ? `<ul class="guild-list">${entries}</ul>` : '<p class="empty">No manageable servers are available.</p>'}${guilds.length > 100 ? '<p>Only the first 100 servers are shown.</p>' : ''}</section>`, '', csrfToken);
 }
 
