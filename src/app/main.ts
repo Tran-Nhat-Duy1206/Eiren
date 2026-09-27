@@ -61,8 +61,8 @@ import { TempvoiceService } from '../modules/tempvoice/service.js';
 import { DiscordTempvoiceGateway } from '../modules/tempvoice/discord-gateway.js';
 import { AchievementRepository } from '../modules/achievements/repository.js';
 import { AchievementsService } from '../modules/achievements/service.js';
-import { V5Scheduler } from './v5-scheduler.js';
-import { AnalyticsRepository } from '../modules/analytics/repository.js';
+import { V5Scheduler, ScheduledStageError } from './v5-scheduler.js';
+import { AnalyticsMaintenanceError, AnalyticsRepository } from '../modules/analytics/repository.js';
 import { AnalyticsService } from '../modules/analytics/service.js';
 import { observedHumanVoice } from '../modules/analytics/voice-snapshot.js';
 import { DashboardAuth } from '../dashboard/auth/dashboard-auth.js';
@@ -195,21 +195,26 @@ async function reconcileAnalyticsVoice() {
 }
 async function analyticsDue() {
   if (!analyticsReady) return;
-  await analytics.runDue();
-  if (dashboardAuth) await dashboardAuth.cleanupExpired();
+  const runStage = async <T>(stage: string, work: () => Promise<T>): Promise<T> => {
+    try { return await work(); }
+    catch (error) { throw new ScheduledStageError(error instanceof AnalyticsMaintenanceError ? `${stage}.${error.stage}` : stage, error); }
+  };
+  await runStage('analytics.runDue', () => analytics.runDue());
+  if (dashboardAuth) await runStage('dashboardAuth.cleanupExpired', () => dashboardAuth.cleanupExpired());
   // V5 scheduler bounds the number of guilds sampled per tick; Discord's observed
   // voice-state cache is proof of current presence, never assume stale DB sessions are live.
   const guildList = [...client.guilds.cache.values()];
   if (!guildList.length) return;
   for (let i = 0; i < Math.min(5, guildList.length); i++) {
     const guild = guildList[analyticsGuildCursor++ % guildList.length]!;
-    if (!await modules.isEnabled(guild.id, 'analytics')) continue;
-    const live = await observedHumanVoice(guild);
+    const enabled = await runStage('analytics.moduleCheck', () => modules.isEnabled(guild.id, 'analytics'));
+    if (!enabled) continue;
+    const live = await runStage('analytics.observedHumanVoice', () => observedHumanVoice(guild));
     if (live === null) continue;
     if (!voiceReconciled.has(guild.id)) {
-      await analytics.reconcileVoice(guild.id, live);
+      await runStage('analytics.reconcileVoice', () => analytics.reconcileVoice(guild.id, live));
       voiceReconciled.add(guild.id);
-    } else await analytics.heartbeat(guild.id, live, new Date(), 1000);
+    } else await runStage('analytics.heartbeat', () => analytics.heartbeat(guild.id, live, new Date(), 1000));
   }
 }
 const v5Scheduler = new V5Scheduler([

@@ -97,6 +97,44 @@ try {
     (await db.select().from(dedupe).where(eq(dedupe.guildId, guildId))).some(row => row.eventKey.startsWith('old-')));
   assert('authoritativeRowsPreserved', (await db.select().from(guilds).where(eq(guilds.id, guildId))).length === 1 &&
     (await db.select().from(members).where(eq(members.guildId, guildId))).length === 1);
+  stage = 'maintenance-regression';
+  // Global scheduler SQL runs inside a rollback-only transaction; operator data is never committed or deleted.
+  const ancient = new Date('1899-01-01T00:00:00.000Z');
+  const maintenanceNow = new Date('1900-01-01T00:00:00.000Z');
+  const rollback = new Error('maintenance fixture rollback');
+  try {
+    await db.transaction(async tx => {
+      const fixtureDb = tx as unknown as typeof db;
+      await tx.insert(dedupe).values({ guildId, eventKey: `maintenance-${id}`, createdAt: ancient });
+      await tx.insert(hourly).values({ guildId, bucketStart: ancient, messages: 1 });
+      await tx.insert(channels).values({ guildId, channelId: 'maintenance', bucketStart: ancient, messages: 1 });
+      await tx.insert(commands).values({ guildId, commandName: 'maintenance', bucketStart: ancient, invocations: 1 });
+      await tx.insert(members).values({ guildId, userId: 'maintenance-member', present: true, lastChangedAt: ancient });
+      await tx.insert(voice).values({ guildId, userId: 'maintenance-voice', channelId: 'maintenance', joinedAt: ancient, updatedAt: ancient });
+      const removedCount = await new AnalyticsRepository(fixtureDb).prune(maintenanceNow, 1);
+      assert('schedulerPrunesAllSixTables', removedCount === 6 &&
+        !(await tx.select().from(dedupe).where(eq(dedupe.eventKey, `maintenance-${id}`))).length &&
+        !(await tx.select().from(hourly).where(eq(hourly.bucketStart, ancient))).length &&
+        !(await tx.select().from(channels).where(eq(channels.channelId, 'maintenance'))).length &&
+        !(await tx.select().from(commands).where(eq(commands.commandName, 'maintenance'))).length &&
+        !(await tx.select().from(members).where(eq(members.userId, 'maintenance-member'))).length &&
+        !(await tx.select().from(voice).where(eq(voice.userId, 'maintenance-voice'))).length);
+      const maintenanceAuth = new DashboardAuth(fixtureDb, { baseUrl: 'http://localhost:3080/',
+        sessionSecret: randomUUID(), discordClientId: 'synthetic', discordClientSecret: randomUUID(), secureCookies: false });
+      const before = (await tx.select().from(dashboardSessions)).length;
+      await maintenanceAuth.cleanupExpired(maintenanceNow);
+      assert('schedulerCleanupNoExpiredSessions', (await tx.select().from(dashboardSessions)).length === before);
+      const current = await maintenanceAuth.createSession('123456', [], null, maintenanceNow);
+      const currentHash = createHash('sha256').update(current.sessionCookie.value).digest('hex');
+      const expired = await maintenanceAuth.createSession('123456', [], null, ancient);
+      const expiredHash = createHash('sha256').update(expired.sessionCookie.value).digest('hex');
+      await maintenanceAuth.cleanupExpired(maintenanceNow);
+      assert('schedulerCleanupKeepsLiveSession', (await tx.select().from(dashboardSessions).where(eq(dashboardSessions.tokenHash, currentHash))).length === 1);
+      assert('schedulerCleanupRemovesExpiredSession', !(await tx.select().from(dashboardSessions).where(eq(dashboardSessions.tokenHash, expiredHash))).length);
+      throw rollback;
+    });
+  } catch (error) { if (error !== rollback) throw error; }
+  assert('schedulerFixtureRolledBack', !(await db.select().from(dedupe).where(eq(dedupe.eventKey, `maintenance-${id}`))).length);
   stage = 'sessions';
   const auth = new DashboardAuth(db, { baseUrl: 'http://localhost:3080/', sessionSecret: randomUUID(),
     discordClientId: 'synthetic', discordClientSecret: randomUUID(), secureCookies: false });

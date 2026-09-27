@@ -21,6 +21,10 @@ export function voiceSlices(start: Date, end: Date): VoiceSlice[] {
   }
   return result;
 }
+export class AnalyticsMaintenanceError extends Error {
+  constructor(readonly stage: string, cause: unknown) { super('Analytics maintenance stage failed', { cause }); }
+}
+
 export class AnalyticsRepository {
   constructor(private readonly db: Database) {}
   async settings(guildId: string) {
@@ -129,17 +133,22 @@ export class AnalyticsRepository {
     return count;
   }
   async prune(now = new Date(), limit = 500) {
+    const runStage = async <T>(stage: string, work: () => Promise<T>): Promise<T> => {
+      try { return await work(); }
+      catch (error) { throw new AnalyticsMaintenanceError(stage, error); }
+    };
     const cap = Math.min(1000, Math.max(1, limit));
     const dedupeCutoff = new Date(now.getTime() - 72 * 3600000);
-    const removed = await this.db.execute(sql`WITH doomed AS (SELECT guild_id, event_key FROM analytics_event_dedupe WHERE created_at < ${dedupeCutoff} LIMIT ${cap}) DELETE FROM analytics_event_dedupe d USING doomed WHERE d.guild_id = doomed.guild_id AND d.event_key = doomed.event_key`);
+    const removed = await runStage('analytics_event_dedupe', () => this.db.execute(sql`WITH doomed AS (SELECT guild_id, event_key FROM analytics_event_dedupe WHERE created_at < ${dedupeCutoff} LIMIT ${cap}) DELETE FROM analytics_event_dedupe d USING doomed WHERE d.guild_id = doomed.guild_id AND d.event_key = doomed.event_key`));
     let total = removed.rowCount ?? 0;
     for (const table of [guildHour, channelHour, commandHour] as const) {
       const name = table === guildHour ? sql`analytics_guild_hourly` : table === channelHour ? sql`analytics_channel_hourly` : sql`analytics_command_hourly`;
-      const result = await this.db.execute(sql`WITH doomed AS (SELECT ctid FROM ${name} AS a WHERE a.bucket_start < ${now} - (COALESCE((SELECT s.retention_days FROM analytics_settings s WHERE s.guild_id = a.guild_id), 180) * interval '1 day') LIMIT ${cap}) DELETE FROM ${name} AS a USING doomed WHERE a.ctid = doomed.ctid`);
+      const result = await runStage(table === guildHour ? 'analytics_guild_hourly' : table === channelHour ? 'analytics_channel_hourly' : 'analytics_command_hourly',
+        () => this.db.execute(sql`WITH doomed AS (SELECT ctid FROM ${name} AS a WHERE a.bucket_start < ${now}::timestamptz - (COALESCE((SELECT s.retention_days FROM analytics_settings s WHERE s.guild_id = a.guild_id), 180) * interval '1 day') LIMIT ${cap}) DELETE FROM ${name} AS a USING doomed WHERE a.ctid = doomed.ctid`));
       total += result.rowCount ?? 0;
     }
-    const stale = await this.db.execute(sql`WITH doomed AS (SELECT a.ctid FROM analytics_member_state a WHERE a.last_changed_at < ${now} - (COALESCE((SELECT s.retention_days FROM analytics_settings s WHERE s.guild_id = a.guild_id), 180) * interval '1 day') LIMIT ${cap}) DELETE FROM analytics_member_state a USING doomed WHERE a.ctid = doomed.ctid`);
-    const abandonedVoice = await this.db.execute(sql`WITH doomed AS (SELECT ctid FROM analytics_active_voice_sessions WHERE updated_at < ${now} - interval '72 hours' LIMIT ${cap}) DELETE FROM analytics_active_voice_sessions a USING doomed WHERE a.ctid = doomed.ctid`);
+    const stale = await runStage('analytics_member_state', () => this.db.execute(sql`WITH doomed AS (SELECT a.ctid FROM analytics_member_state a WHERE a.last_changed_at < ${now}::timestamptz - (COALESCE((SELECT s.retention_days FROM analytics_settings s WHERE s.guild_id = a.guild_id), 180) * interval '1 day') LIMIT ${cap}) DELETE FROM analytics_member_state a USING doomed WHERE a.ctid = doomed.ctid`));
+    const abandonedVoice = await runStage('analytics_active_voice_sessions', () => this.db.execute(sql`WITH doomed AS (SELECT ctid FROM analytics_active_voice_sessions WHERE updated_at < ${now}::timestamptz - interval '72 hours' LIMIT ${cap}) DELETE FROM analytics_active_voice_sessions a USING doomed WHERE a.ctid = doomed.ctid`));
     return total + (stale.rowCount ?? 0) + (abandonedVoice.rowCount ?? 0);
   }
   async summary(guildId: string, range: AnalyticsRange, now = new Date(), timezone = 'UTC') {
