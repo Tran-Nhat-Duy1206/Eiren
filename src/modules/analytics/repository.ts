@@ -1,8 +1,8 @@
-import { and, eq, gte, lt, sql } from 'drizzle-orm';
+import { and, eq, gte, isNotNull, lt, notInArray, sql } from 'drizzle-orm';
 import type { Database } from '../../core/database/connection.js';
 import { analyticsSettings, analyticsGuildHourly as guildHour, analyticsChannelHourly as channelHour,
   analyticsCommandHourly as commandHour, analyticsEventDedupe as dedupe, analyticsMemberState as members,
-  analyticsActiveVoiceSessions as voice,  } from '../../core/database/schema.js';
+  analyticsActiveVoiceSessions as voice, guildModules } from '../../core/database/schema.js';
 
 export type AnalyticsRange = '24h' | '7d' | '30d' | '90d';
 export const rangeHours: Record<AnalyticsRange, number> = { '24h': 24, '7d': 168, '30d': 720, '90d': 2160 };
@@ -79,58 +79,108 @@ export class AnalyticsRepository {
       return true;
     });
   }
-  async voice(guildId: string, userId: string, channelId: string | null, at: Date) {
-    return this.db.transaction(async tx => {
-      // Locks the member even when no session exists; duplicate and reordered gateway updates cannot double count.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), hashtext(${userId}))`);
-      const [old] = await tx.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
-      if (old && at > old.updatedAt && at.getTime() - old.updatedAt.getTime() <= 600000) {
-        // Gaps over ten minutes are downtime, never inferred participation.
-        for (const slice of voiceSlices(old.updatedAt, at)) {
-          await tx.insert(guildHour).values({ guildId, bucketStart: slice.bucketStart, voiceSeconds: slice.seconds })
-            .onConflictDoUpdate({ target: [guildHour.guildId, guildHour.bucketStart], set: { voiceSeconds: sql`${guildHour.voiceSeconds} + ${slice.seconds}` } });
-          await tx.insert(channelHour).values({ guildId, channelId: old.channelId, bucketStart: slice.bucketStart, voiceSeconds: slice.seconds })
-            .onConflictDoUpdate({ target: [channelHour.guildId, channelHour.channelId, channelHour.bucketStart], set: { voiceSeconds: sql`${channelHour.voiceSeconds} + ${slice.seconds}` } });
-        }
+  private async voiceModuleState(tx: Parameters<Parameters<Database['transaction']>[0]>[0], guildId: string) {
+    const [state] = await tx.select({ enabled: guildModules.enabled, version: guildModules.version }).from(guildModules)
+      .where(and(eq(guildModules.guildId, guildId), eq(guildModules.moduleKey, 'analytics')));
+    return state;
+  }
+  private async voiceIn(tx: Parameters<Parameters<Database['transaction']>[0]>[0], guildId: string,
+    userId: string, channelId: string | null, at: Date, readyAt?: Date) {
+    // Every voice writer acquires the guild lock first, then the member lock, including snapshots.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), hashtext(${userId}))`);
+    const [old] = await tx.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
+    if (old && at <= old.updatedAt) return false;
+    if (old?.channelId && (!readyAt || old.updatedAt >= readyAt) && at.getTime() - old.updatedAt.getTime() <= 600000) {
+      for (const slice of voiceSlices(old.updatedAt, at)) {
+        await tx.insert(guildHour).values({ guildId, bucketStart: slice.bucketStart, voiceSeconds: slice.seconds })
+          .onConflictDoUpdate({ target: [guildHour.guildId, guildHour.bucketStart], set: { voiceSeconds: sql`${guildHour.voiceSeconds} + ${slice.seconds}` } });
+        await tx.insert(channelHour).values({ guildId, channelId: old.channelId, bucketStart: slice.bucketStart, voiceSeconds: slice.seconds })
+          .onConflictDoUpdate({ target: [channelHour.guildId, channelHour.channelId, channelHour.bucketStart], set: { voiceSeconds: sql`${channelHour.voiceSeconds} + ${slice.seconds}` } });
       }
-      if (old && at <= old.updatedAt) return false;
-      if (channelId === null) {
-        if (old) await tx.delete(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
-      } else if (old) {
-        await tx.update(voice).set({ channelId, joinedAt: old.channelId === channelId && at.getTime() - old.updatedAt.getTime() <= 600000 ? old.joinedAt : at, updatedAt: at })
-          .where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
-      } else await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: at, updatedAt: at });
+    }
+    const joinedAt = old?.channelId === channelId && (!readyAt || old.updatedAt >= readyAt) &&
+      at.getTime() - old.updatedAt.getTime() <= 600000 ? old.joinedAt : at;
+    await tx.insert(voice).values({ guildId, userId, channelId, joinedAt, updatedAt: at })
+      .onConflictDoUpdate({ target: [voice.guildId, voice.userId], set: { channelId, joinedAt, updatedAt: at } });
+    return true;
+  }
+  private async baselineVoiceIn(tx: Parameters<Parameters<Database['transaction']>[0]>[0], guildId: string,
+    userId: string, channelId: string | null, at: Date) {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), hashtext(${userId}))`);
+    const rows = await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: at, updatedAt: at })
+      .onConflictDoUpdate({ target: [voice.guildId, voice.userId],
+        set: { channelId, joinedAt: at, updatedAt: at }, setWhere: sql`${voice.updatedAt} < ${at}` })
+      .returning({ userId: voice.userId });
+    return rows.length !== 0;
+  }
+  async voice(guildId: string, userId: string, channelId: string | null, at: Date, readyAt?: Date, readyEpoch?: number) {
+    return this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
+      const module = await this.voiceModuleState(tx, guildId);
+      if (module && !module.enabled) return false;
+      // A different worker may have disabled/re-enabled since this process marked the guild ready.
+      if (readyEpoch !== undefined && (module?.version ?? 0) !== readyEpoch)
+        return this.baselineVoiceIn(tx, guildId, userId, channelId, at);
+      return this.voiceIn(tx, guildId, userId, channelId, at, readyAt);
+    });
+  }
+  /** Before guild readiness, persist an event fence without charging a persisted pre-restart interval. */
+  async baselineVoice(guildId: string, userId: string, channelId: string | null, at: Date) {
+    return this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
+      if ((await this.voiceModuleState(tx, guildId))?.enabled === false) return false;
+      return this.baselineVoiceIn(tx, guildId, userId, channelId, at);
+    });
+  }
+  /** The cutoff precedes snapshot collection; the later baseline never licenses touching newer gateway rows. */
+  async reconcileVoice(guildId: string, live: readonly { userId: string; channelId: string }[], cutoff: Date,
+    baselineAt = cutoff, observedEpoch?: number) {
+    if (live.length > 1000 || baselineAt < cutoff) throw new Error('Invalid voice reconciliation boundary');
+    const unique = new Map(live.map(item => [item.userId, item.channelId]));
+    const applied = await this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
+      const module = await this.voiceModuleState(tx, guildId);
+      if (module?.enabled === false || (observedEpoch !== undefined && (module?.version ?? 0) !== observedEpoch)) return false;
+      // Tombstones preserve newer leaves; never charge pre-restart or unobserved time.
+      await tx.update(voice).set({ channelId: null, joinedAt: baselineAt, updatedAt: baselineAt }).where(and(
+        eq(voice.guildId, guildId), lt(voice.updatedAt, cutoff), isNotNull(voice.channelId),
+        ...(unique.size ? [notInArray(voice.userId, [...unique.keys()])] : [])));
+      for (const [userId, channelId] of unique) {
+        await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: baselineAt, updatedAt: baselineAt })
+          .onConflictDoUpdate({ target: [voice.guildId, voice.userId], set: { channelId, joinedAt: baselineAt, updatedAt: baselineAt },
+            setWhere: sql`${voice.updatedAt} < ${cutoff}` });
+      }
       return true;
     });
+    return applied ? unique.size : -1;
   }
-  /** A fresh complete snapshot resets the baseline; offline time is never charged. */
-  async reconcileVoice(guildId: string, live: readonly { userId: string; channelId: string }[], at: Date) {
-    if (live.length > 1000) throw new Error('Voice reconciliation exceeds 1000 members');
-    const unique = new Map(live.map(item => [item.userId, item.channelId]));
-    await this.db.transaction(async tx => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
-      // Remove absent sessions only; never charge the time since the prior process stopped.
-      await tx.execute(sql`DELETE FROM analytics_active_voice_sessions WHERE guild_id = ${guildId} AND updated_at <= ${at} AND NOT (user_id = ANY(${[...unique.keys()]}::text[]))`);
-      for (const [userId, channelId] of unique) {
-        await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: at, updatedAt: at })
-          .onConflictDoUpdate({ target: [voice.guildId, voice.userId], set: { channelId, joinedAt: at, updatedAt: at },
-            setWhere: sql`${voice.updatedAt} <= ${at}` });
-      }
-    });
-    return unique.size;
-  }
-  /** Only observed live sessions accrue time; missing sessions are closed without charging. */
-  async heartbeat(guildId: string, live: readonly { userId: string; channelId: string }[], at: Date, limit = 1000) {
+  /** One guild-locked transaction: only matching, older active sessions accrue observed time. */
+  async heartbeat(guildId: string, live: readonly { userId: string; channelId: string }[], cutoff: Date,
+    limit = 1000, baselineAt = cutoff, readyAt?: Date, readyEpoch?: number) {
     const cap = Math.min(1000, Math.max(1, limit));
-    if (live.length > cap) throw new Error('Voice heartbeat exceeds limit; incomplete snapshots cannot be reconciled');
+    if (live.length > cap || baselineAt < cutoff) throw new Error('Voice heartbeat exceeds limit or has invalid boundary');
     const unique = new Map(live.map(item => [item.userId, item.channelId]));
-    let count = 0;
-    for (const [userId, channelId] of unique) {
-      await this.voice(guildId, userId, channelId, at);
-      count++;
-    }
-    await this.db.execute(sql`DELETE FROM analytics_active_voice_sessions WHERE guild_id = ${guildId} AND updated_at < ${at} AND NOT (user_id = ANY(${[...unique.keys()]}::text[]))`);
-    return count;
+    return this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
+      const module = await this.voiceModuleState(tx, guildId);
+      if (module?.enabled === false || (readyEpoch !== undefined && (module?.version ?? 0) !== readyEpoch)) return -1;
+      for (const [userId, channelId] of unique) {
+        const [old] = await tx.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
+        if (old && old.updatedAt >= cutoff) continue; // newer event (including a leave tombstone) wins.
+        if (old?.channelId === channelId && (!readyAt || old.updatedAt >= readyAt)) {
+          await this.voiceIn(tx, guildId, userId, channelId, cutoff, readyAt);
+        } else {
+          // Snapshot disagrees with the last observed channel: reset, never attribute an uncertain interval.
+          await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: baselineAt, updatedAt: baselineAt })
+            .onConflictDoUpdate({ target: [voice.guildId, voice.userId],
+              set: { channelId, joinedAt: baselineAt, updatedAt: baselineAt }, setWhere: sql`${voice.updatedAt} < ${cutoff}` });
+        }
+      }
+      await tx.update(voice).set({ channelId: null, joinedAt: baselineAt, updatedAt: baselineAt }).where(and(
+        eq(voice.guildId, guildId), lt(voice.updatedAt, cutoff), isNotNull(voice.channelId),
+        ...(unique.size ? [notInArray(voice.userId, [...unique.keys()])] : [])));
+      return unique.size;
+    });
   }
   async prune(now = new Date(), limit = 500) {
     const runStage = async <T>(stage: string, work: () => Promise<T>): Promise<T> => {

@@ -28,6 +28,8 @@ export const guildModules = pgTable('guild_modules', {
   enabled: boolean('enabled').notNull(),
   updatedBy: text('updated_by').notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  // Monotonic epoch separates rapid disable/re-enable transitions even within one millisecond.
+  version: integer('version').notNull().default(0),
 }, table => [primaryKey({ columns: [table.guildId, table.moduleKey] })]);
 
 export const guildPermissionRoles = pgTable('guild_permission_roles', {
@@ -645,7 +647,8 @@ export const analyticsMemberState = pgTable('analytics_member_state', {
 export const analyticsActiveVoiceSessions = pgTable('analytics_active_voice_sessions', {
   guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
   userId: text('user_id').notNull(),
-  channelId: text('channel_id').notNull(),
+  // Null is a bounded disconnect tombstone: stale snapshots must not resurrect a newer leave.
+  channelId: text('channel_id'),
   joinedAt: timestamp('joined_at', { withTimezone: true }).notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
 }, table => [primaryKey({ columns: [table.guildId, table.userId] }),

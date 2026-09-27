@@ -8,9 +8,9 @@ const voiceEvent = analyticsEvents.find(event => event.name === Events.VoiceStat
 const joinEvent = analyticsEvents.find(event => event.name === Events.GuildMemberAdd)!;
 const leaveEvent = analyticsEvents.find(event => event.name === Events.GuildMemberRemove)!;
 function fixture() {
-  const recordMessage = vi.fn(); const recordVoice = vi.fn(); const recordMember = vi.fn();
-  return { services: { analytics: { recordMessage, recordVoice, recordMember } } as unknown as Services,
-    recordMessage, recordVoice, recordMember };
+  const recordMessage = vi.fn(); const recordVoice = vi.fn(); const recordMember = vi.fn(); const fenceUnknownVoice = vi.fn();
+  return { services: { analytics: { recordMessage, recordVoice, recordMember, fenceUnknownVoice } } as unknown as Services,
+    recordMessage, recordVoice, recordMember, fenceUnknownVoice };
 }
 const guild = { id: '123', afkChannelId: 'afk', members: { fetch: vi.fn(async ({ user }: { user: string }) => ({ user: { bot: user === 'bot' } })) } };
 describe('analytics gateway metadata filters', () => {
@@ -35,6 +35,14 @@ describe('analytics gateway metadata filters', () => {
     expect(recordVoice).toHaveBeenCalledTimes(1);
     await voiceEvent.handle(services, { ...after, id: 'human' }, { ...after, id: 'human', channelId: 'afk' });
     expect(recordVoice).toHaveBeenLastCalledWith('123', 'human', null, expect.any(Date));
+  });
+  it('fences unclassified gateway updates without crediting an unverified participant', async () => {
+    const { services, recordVoice, fenceUnknownVoice } = fixture();
+    const unavailable = { ...guild, members: { fetch: vi.fn().mockRejectedValue(new Error('member unavailable')) } };
+    await voiceEvent.handle(services, { guild: unavailable, id: 'unknown', member: null, channelId: 'A' },
+      { guild: unavailable, id: 'unknown', member: null, channelId: 'B' });
+    expect(fenceUnknownVoice).toHaveBeenCalledWith('123', 'unknown', expect.any(Date));
+    expect(recordVoice).not.toHaveBeenCalled();
   });
   it('observes member transitions only for real users when gateway intent is available', async () => {
     const { services, recordMember } = fixture();

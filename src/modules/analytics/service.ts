@@ -4,8 +4,18 @@ import type { ModuleService } from '../../services/module-service.js';
 import { AnalyticsRepository, rangeHours, type AnalyticsRange } from './repository.js';
 
 export class AnalyticsService {
+  private readonly voiceReady = new Map<string, { at: Date; epoch: number }>();
+  private readonly voiceGeneration = new Map<string, number>();
+  /** Invalidated after every analytics module write, including an idempotent toggle. */
+  invalidateVoice(guildId: string) {
+    this.voiceReady.delete(guildId);
+    this.voiceGeneration.set(guildId, (this.voiceGeneration.get(guildId) ?? 0) + 1);
+  }
+  isVoiceReady(guildId: string) { return this.voiceReady.has(guildId); }
   constructor(readonly repository: AnalyticsRepository, private readonly permissions: PermissionService,
-    private readonly modules: ModuleService) {}
+    private readonly modules: ModuleService) {
+    modules.onChange?.((guildId, key) => { if (key === 'analytics') this.invalidateVoice(guildId); });
+  }
   private validate(at: Date) {
     if (!(at instanceof Date) || !Number.isFinite(at.getTime()) || at.getTime() > Date.now() + 300000)
       throw new AppError('VALIDATION', 'Invalid analytics timestamp.');
@@ -23,8 +33,17 @@ export class AnalyticsService {
   }
   async recordVoice(guildId: string, userId: string, channelId: string | null, at: Date) {
     this.validate(at);
+    if (!await this.modules.isEnabled(guildId, 'analytics')) { this.invalidateVoice(guildId); return false; }
+    // During startup, preserve the event as a no-credit fence so a slow snapshot cannot revive old state.
+    if (!this.isVoiceReady(guildId)) return this.repository.baselineVoice(guildId, userId, channelId, at);
+    return this.repository.voice(guildId, userId, channelId, at, this.voiceReady.get(guildId)?.at,
+      this.voiceReady.get(guildId)?.epoch);
+  }
+  /** Unknown member identity cannot contribute voice time, but fences a concurrent stale snapshot. */
+  async fenceUnknownVoice(guildId: string, userId: string, at: Date) {
+    this.validate(at);
     if (!await this.modules.isEnabled(guildId, 'analytics')) return false;
-    return this.repository.voice(guildId, userId, channelId, at);
+    return this.repository.baselineVoice(guildId, userId, null, at);
   }
   async recordCommand(guildId: string, interactionId: string, commandName: string, failed: boolean, durationMs: number, at: Date) {
     this.validate(at);
@@ -61,12 +80,23 @@ export class AnalyticsService {
     return this.summary(actor.guildId, range, timezone);
   }
   async runDue(now = new Date(), limit = 500) { return this.repository.prune(now, limit); }
-  async reconcileVoice(guildId: string, live: readonly { userId: string; channelId: string }[], now = new Date()) {
-    if (!await this.modules.isEnabled(guildId, 'analytics')) return 0;
-    return this.repository.reconcileVoice(guildId, live, now);
+  async reconcileVoice(guildId: string, live: readonly { userId: string; channelId: string }[], cutoff = new Date(),
+    baselineAt = cutoff, observedEpoch?: number) {
+    const generation = this.voiceGeneration.get(guildId) ?? 0;
+    const epoch = observedEpoch ?? await this.modules.voiceEpoch?.(guildId) ?? 0;
+    if (!await this.modules.isEnabled(guildId, 'analytics')) { this.invalidateVoice(guildId); return 0; }
+    const count = await this.repository.reconcileVoice(guildId, live, cutoff, baselineAt, epoch);
+    if (count >= 0 && generation === (this.voiceGeneration.get(guildId) ?? 0) &&
+      await this.modules.isEnabled(guildId, 'analytics')) this.voiceReady.set(guildId, { at: baselineAt, epoch });
+    return Math.max(0, count);
   }
-  async heartbeat(guildId: string, live: readonly { userId: string; channelId: string }[], now = new Date(), limit = 1000) {
-    if (!await this.modules.isEnabled(guildId, 'analytics')) return 0;
-    return this.repository.heartbeat(guildId, live, now, limit);
+  async heartbeat(guildId: string, live: readonly { userId: string; channelId: string }[], now = new Date(), limit = 1000, baselineAt = now) {
+    if (!this.isVoiceReady(guildId)) return 0;
+    if (!await this.modules.isEnabled(guildId, 'analytics')) { this.invalidateVoice(guildId); return 0; }
+    if (!this.isVoiceReady(guildId)) return 0;
+    const count = await this.repository.heartbeat(guildId, live, now, limit, baselineAt,
+      this.voiceReady.get(guildId)?.at, this.voiceReady.get(guildId)?.epoch);
+    if (count < 0) { this.invalidateVoice(guildId); return 0; }
+    return count;
   }
 }

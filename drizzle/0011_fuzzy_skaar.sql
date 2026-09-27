@@ -1,0 +1,1 @@
+ALTER TABLE "analytics_active_voice_sessions" ALTER COLUMN "channel_id" DROP NOT NULL;

@@ -78,6 +78,20 @@
       "when": 1790497453057,
       "tag": "0010_silky_taskmaster",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790521366446,
+      "tag": "0011_fuzzy_skaar",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790523332413,
+      "tag": "0012_brainy_stick",
+      "breakpoints": true
     }
   ]
 }

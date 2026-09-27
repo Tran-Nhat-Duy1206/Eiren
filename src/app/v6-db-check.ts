@@ -5,8 +5,12 @@ import { createDatabase } from '../core/database/connection.js';
 import { guilds, analyticsGuildHourly as hourly, analyticsChannelHourly as channels,
   analyticsCommandHourly as commands, analyticsEventDedupe as dedupe,
   analyticsMemberState as members, analyticsActiveVoiceSessions as voice,
-  dashboardSessions, dashboardAuditLog } from '../core/database/schema.js';
+  dashboardSessions, dashboardAuditLog, guildModules } from '../core/database/schema.js';
 import { AnalyticsRepository } from '../modules/analytics/repository.js';
+import { AnalyticsService } from '../modules/analytics/service.js';
+import { ModuleService } from '../services/module-service.js';
+import { GuildRepository } from '../repositories/guild-repository.js';
+import type { PermissionService } from '../core/permissions/permission-service.js';
 import { DashboardAuth } from '../dashboard/auth/dashboard-auth.js';
 
 const checks: Record<string, boolean | number | string> = {};
@@ -58,10 +62,123 @@ try {
     (await db.select().from(channels).where(and(eq(channels.guildId, guildId), eq(channels.channelId, 'alpha'))))
       .reduce((sum, row) => sum + row.voiceSeconds, 0) === 20);
   await analytics.voice(guildId, 'speaker', null, time(3620_000));
-  assert('voiceExitAndAllocation', (await db.select().from(voice).where(eq(voice.guildId, guildId))).length === 0 &&
+  assert('voiceExitAndAllocation', (await db.select().from(voice).where(eq(voice.guildId, guildId)))[0]?.channelId === null &&
     (await db.select().from(channels).where(and(eq(channels.guildId, guildId), eq(channels.channelId, 'beta'))))
       .reduce((sum, row) => sum + row.voiceSeconds, 0) === 10 &&
     (await db.select().from(hourly).where(eq(hourly.guildId, guildId))).reduce((sum, row) => sum + row.voiceSeconds, 0) === 30);
+  stage = 'voice-race';
+  let analyticsEnabled = true;
+  const gated = new AnalyticsService(analytics, {} as PermissionService,
+    { isEnabled: async () => analyticsEnabled } as unknown as ModuleService);
+  const seconds = async (channelId: string) => (await db.select().from(channels).where(and(eq(channels.guildId, guildId), eq(channels.channelId, channelId))))
+    .reduce((sum, row) => sum + row.voiceSeconds, 0);
+  // A short restart (<10m) used to bill bot downtime. A pre-ready event is a no-credit fence.
+  await analytics.voice(guildId, 'restart-short', 'restart-short', time(4000_000));
+  await gated.recordVoice(guildId, 'restart-short', 'restart-short', time(4120_000));
+  assert('shortRestartNeverCreditsDowntime', await seconds('restart-short') === 0 &&
+    (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'restart-short'))))[0]?.updatedAt.getTime() === time(4120_000).getTime());
+  stage = 'voice-race-reconcile';
+  await gated.reconcileVoice(guildId, [{ userId: 'restart-short', channelId: 'restart-short' }], time(4130_000), time(4140_000));
+  await gated.recordVoice(guildId, 'restart-short', 'restart-short', time(4145_000));
+  assert('freshBaselineAccruesOnlyObservedTime', await seconds('restart-short') === 5);
+  await analytics.voice(guildId, 'restart-long', 'restart-long', time(4600_000));
+  const longGated = new AnalyticsService(analytics, {} as PermissionService,
+    { isEnabled: async () => true } as unknown as ModuleService);
+  await longGated.recordVoice(guildId, 'restart-long', 'restart-long', time(5260_000));
+  assert('longRestartAlsoNeverCreditsDowntime', await seconds('restart-long') === 0);
+  const snapshotCutoff = time(5900_000);
+  await analytics.voice(guildId, 'mover', 'A-move', time(5890_000));
+  await analytics.voice(guildId, 'mover', 'B-move', time(5901_000));
+  const movedBefore = (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'mover'))))[0]!;
+  await analytics.reconcileVoice(guildId, [{ userId: 'mover', channelId: 'A-move' }], snapshotCutoff, time(5910_000));
+  const movedAfter = (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'mover'))))[0]!;
+  assert('staleSnapshotCannotOverwriteMove', movedAfter.channelId === 'B-move' &&
+    movedAfter.joinedAt.getTime() === movedBefore.joinedAt.getTime() && movedAfter.updatedAt.getTime() === movedBefore.updatedAt.getTime());
+  await analytics.voice(guildId, 'newer-join', 'B-join', time(5902_000));
+  await analytics.reconcileVoice(guildId, [], snapshotCutoff, time(5910_000));
+  assert('staleSnapshotCannotDeleteNewJoin', (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'newer-join'))))[0]?.channelId === 'B-join');
+  await analytics.voice(guildId, 'leaver', 'A-leave', time(5890_000));
+  await analytics.voice(guildId, 'leaver', null, time(5903_000));
+  await analytics.reconcileVoice(guildId, [{ userId: 'leaver', channelId: 'A-leave' }], snapshotCutoff, time(5910_000));
+  assert('staleSnapshotCannotResurrectLeave', (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'leaver'))))[0]?.channelId === null);
+  await analytics.heartbeat(guildId, [{ userId: 'mover', channelId: 'A-move' }], snapshotCutoff, 1000, time(5910_000));
+  assert('staleHeartbeatPreservesMoveAndJoin', (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'mover'))))[0]?.channelId === 'B-move' &&
+    (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'newer-join'))))[0]?.channelId === 'B-join');
+  const equalBoundary = time(5940_000);
+  await analytics.baselineVoice(guildId, 'same-millisecond', 'B-equal', equalBoundary);
+  await analytics.reconcileVoice(guildId, [{ userId: 'same-millisecond', channelId: 'A-equal' }], equalBoundary, time(5950_000));
+  await analytics.heartbeat(guildId, [{ userId: 'same-millisecond', channelId: 'A-equal' }], equalBoundary, 1000, time(5950_000));
+  assert('equalBoundaryNeverOverwritesNewEvent', (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'same-millisecond'))))[0]?.channelId === 'B-equal');
+  await analytics.voice(guildId, 'concurrent', 'A-concurrent', time(5960_000));
+  await Promise.all([
+    analytics.heartbeat(guildId, [{ userId: 'concurrent', channelId: 'A-concurrent' }], time(5970_000), 1000, time(5970_000)),
+    analytics.voice(guildId, 'concurrent', 'B-concurrent', time(5971_000)),
+  ]);
+  assert('guildLockedConcurrentHeartbeatAndMove', await seconds('A-concurrent') === 11 &&
+    (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'concurrent'))))[0]?.channelId === 'B-concurrent');
+  const equalStartup = time(5980_000);
+  await analytics.voice(guildId, 'same-startup-millisecond', 'equal-restart', equalStartup);
+  const equalGated = new AnalyticsService(analytics, {} as PermissionService,
+    { isEnabled: async () => true } as unknown as ModuleService);
+  await equalGated.reconcileVoice(guildId, [{ userId: 'same-startup-millisecond', channelId: 'equal-restart' }],
+    equalStartup, time(5982_000));
+  await equalGated.recordVoice(guildId, 'same-startup-millisecond', 'equal-restart', time(5985_000));
+  assert('equalStartupBoundaryNeverCreditsDowntime', await seconds('equal-restart') === 0);
+  await equalGated.heartbeat(guildId, [{ userId: 'same-startup-millisecond', channelId: 'equal-restart' }], time(5990_000));
+  assert('equalStartupResumeCreditsObservedTime', await seconds('equal-restart') === 5);
+  await analytics.voice(guildId, 'reordered', 'A-reordered', time(5960_000));
+  await analytics.voice(guildId, 'reordered', 'B-reordered', time(5970_000));
+  const reordered = await analytics.voice(guildId, 'reordered', 'A-reordered', time(5965_000));
+  const duplicate = await analytics.voice(guildId, 'reordered', 'B-reordered', time(5970_000));
+  assert('duplicateAndReorderedEventsNoDoubleCredit', !reordered && !duplicate && await seconds('A-reordered') === 10 &&
+    (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'reordered'))))[0]?.channelId === 'B-reordered');
+  await analytics.voice(guildId, 'disabled-user', 'disabled-voice', time(6000_000));
+  gated.invalidateVoice(guildId);
+  analyticsEnabled = false;
+  assert('disabledVoiceEventRejected', !await gated.recordVoice(guildId, 'disabled-user', 'disabled-voice', time(6050_000)));
+  analyticsEnabled = true;
+  gated.invalidateVoice(guildId);
+  assert('reenabledHeartbeatWaitsForBaseline', await gated.heartbeat(guildId,
+    [{ userId: 'disabled-user', channelId: 'disabled-voice' }], time(6055_000)) === 0 && await seconds('disabled-voice') === 0);
+  await gated.recordVoice(guildId, 'disabled-user', 'disabled-voice', time(6060_000));
+  assert('reenabledVoiceNeverCreditsDisabledTime', await seconds('disabled-voice') === 0);
+  await gated.reconcileVoice(guildId, [{ userId: 'disabled-user', channelId: 'disabled-voice' }], time(6070_000), time(6080_000));
+  await gated.heartbeat(guildId, [{ userId: 'disabled-user', channelId: 'disabled-voice' }], time(6085_000), 1000);
+  assert('reenabledVoiceAccruesOnlyAfterFreshBaseline', await seconds('disabled-voice') === 5);
+  const moduleRepository = new GuildRepository(db);
+  const realModules = new ModuleService(moduleRepository,
+    [{ key: 'core', defaultEnabled: true }, { key: 'analytics', defaultEnabled: false }]);
+  await realModules.setEnabled(guildId, 'analytics', true, 'synthetic');
+  // Backdate only our synthetic module row to model a completed enable before the virtual fixture clock.
+  await db.update(guildModules).set({ updatedAt: time(6090_000) })
+    .where(and(eq(guildModules.guildId, guildId), eq(guildModules.moduleKey, 'analytics')));
+  const realGated = new AnalyticsService(analytics, {} as PermissionService, realModules);
+  const initialEpoch = await realModules.voiceEpoch(guildId);
+  await analytics.voice(guildId, 'toggle-fence', 'toggle-fence', time(6100_000));
+  await realGated.reconcileVoice(guildId, [{ userId: 'toggle-fence', channelId: 'toggle-fence' }],
+    time(6110_000), time(6120_000));
+  await realModules.setEnabled(guildId, 'analytics', false, 'synthetic');
+  assert('dbToggleRejectsDelayedVoiceWrite', !await analytics.voice(guildId, 'toggle-fence', 'toggle-fence', time(6150_000), time(6120_000), initialEpoch) &&
+    await seconds('toggle-fence') === 0 && !realGated.isVoiceReady(guildId));
+  await realModules.setEnabled(guildId, 'analytics', true, 'synthetic');
+  await db.update(guildModules).set({ updatedAt: time(6120_000) })
+    .where(and(eq(guildModules.guildId, guildId), eq(guildModules.moduleKey, 'analytics')));
+  const staleModuleSnapshot = await analytics.reconcileVoice(guildId,
+    [{ userId: 'toggle-fence', channelId: 'stale-toggle' }], time(6120_000), time(6140_000), initialEpoch);
+  assert('sameMillisecondModuleEpochRejectsStaleSnapshot', staleModuleSnapshot === -1 &&
+    (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'toggle-fence'))))[0]?.channelId === 'toggle-fence');
+  assert('sameMillisecondModuleEpochRejectsHeartbeat',
+    await analytics.heartbeat(guildId, [{ userId: 'toggle-fence', channelId: 'toggle-fence' }],
+      time(6150_000), 1000, time(6150_000), time(6120_000), initialEpoch) === -1 && await seconds('toggle-fence') === 0);
+  await analytics.voice(guildId, 'toggle-fence', 'toggle-fence', time(6160_000), time(6120_000), initialEpoch);
+  assert('dbToggleReenableFencesOtherWorker', await seconds('toggle-fence') === 0 &&
+    (await realModules.voiceEpoch(guildId)) === initialEpoch + 2);
+  await db.update(guildModules).set({ updatedAt: time(6165_000) })
+    .where(and(eq(guildModules.guildId, guildId), eq(guildModules.moduleKey, 'analytics')));
+  await realGated.reconcileVoice(guildId, [{ userId: 'toggle-fence', channelId: 'toggle-fence' }],
+    time(6170_000), time(6180_000));
+  await realGated.heartbeat(guildId, [{ userId: 'toggle-fence', channelId: 'toggle-fence' }], time(6185_000));
+  assert('dbToggleFreshInterval', await seconds('toggle-fence') === 5);
   stage = 'commands';
   assert('commandAccepted', await analytics.command(guildId, `cmd-${id}`, 'check', false, 11, time(1000)));
   assert('commandDedupeAndAggregate', !await analytics.command(guildId, `cmd-${id}`, 'check', true, 99, time(1000)) &&
@@ -162,6 +279,8 @@ try {
 } catch (error) {
   checks.failedStage = stage;
   checks.errorClass = error instanceof Error ? error.constructor.name : 'unknown';
+  const pgCause = error as { cause?: { code?: string; cause?: { code?: string } } };
+  checks.pgCode = pgCause.cause?.code ?? pgCause.cause?.cause?.code ?? 'none';
   process.exitCode = 1;
 } finally {
   if (connection) {

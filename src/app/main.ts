@@ -178,20 +178,23 @@ const scheduler = new ModerationScheduler(moderation, async guildId => {
 let analyticsGuildCursor = 0;
 let analyticsReady = false;
 let analyticsReconcile: Promise<void> | undefined;
-const voiceReconciled = new Set<string>();
 async function reconcileAnalyticsVoice() {
   try {
     for (const guild of [...client.guilds.cache.values()].slice(0, 5)) {
       try {
+        if (!await modules.isEnabled(guild.id, 'analytics')) continue;
+        const epoch = await modules.voiceEpoch(guild.id);
+        const cutoff = new Date();
         const live = await observedHumanVoice(guild);
-        if (live !== null && await modules.isEnabled(guild.id, 'analytics')) {
-          await analytics.reconcileVoice(guild.id, live);
-          voiceReconciled.add(guild.id);
-        } else if (live === null) logger.warn({ guildId: guild.id }, 'Incomplete voice snapshot; analytics recovery deferred');
+        if (live !== null) await analytics.reconcileVoice(guild.id, live, cutoff, new Date(), epoch);
+        else logger.warn({ guildId: guild.id }, 'Incomplete voice snapshot; analytics recovery deferred');
       } catch (error) { logger.warn({ guildId: guild.id, errorType: error instanceof Error ? error.name : 'unknown' },
         'Voice analytics restart reconciliation failed; stale time is not counted'); }
     }
-  } finally { analyticsReady = true; }
+  } finally {
+    analyticsReady = true;
+    logger.debug('Voice analytics startup reconciliation complete');
+  }
 }
 async function analyticsDue() {
   if (!analyticsReady) return;
@@ -208,13 +211,15 @@ async function analyticsDue() {
   for (let i = 0; i < Math.min(5, guildList.length); i++) {
     const guild = guildList[analyticsGuildCursor++ % guildList.length]!;
     const enabled = await runStage('analytics.moduleCheck', () => modules.isEnabled(guild.id, 'analytics'));
-    if (!enabled) continue;
+    if (!enabled) { analytics.invalidateVoice(guild.id); continue; }
+    const epoch = await runStage('analytics.voiceEpoch', () => modules.voiceEpoch(guild.id));
+    const cutoff = new Date();
     const live = await runStage('analytics.observedHumanVoice', () => observedHumanVoice(guild));
     if (live === null) continue;
-    if (!voiceReconciled.has(guild.id)) {
-      await runStage('analytics.reconcileVoice', () => analytics.reconcileVoice(guild.id, live));
-      voiceReconciled.add(guild.id);
-    } else await runStage('analytics.heartbeat', () => analytics.heartbeat(guild.id, live, new Date(), 1000));
+    const baselineAt = new Date();
+    if (!analytics.isVoiceReady(guild.id)) {
+      await runStage('analytics.reconcileVoice', () => analytics.reconcileVoice(guild.id, live, cutoff, baselineAt, epoch));
+    } else await runStage('analytics.heartbeat', () => analytics.heartbeat(guild.id, live, cutoff, 1000, baselineAt));
   }
 }
 const v5Scheduler = new V5Scheduler([

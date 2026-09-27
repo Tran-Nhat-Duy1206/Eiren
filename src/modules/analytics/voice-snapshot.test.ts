@@ -17,6 +17,16 @@ describe('voice snapshot classification without GuildMembers intent', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetch).toHaveBeenCalledWith({ user: 'human', force: true });
   });
+  it('freezes channel IDs before an asynchronous member lookup can observe a newer state', async () => {
+    const state = { id: 'human', channelId: 'old', member: null };
+    let resolve!: (member: { user: { bot: boolean } }) => void;
+    const fetch = vi.fn(() => new Promise<{ user: { bot: boolean } }>(done => { resolve = done; }));
+    const { guild } = fixture([state], fetch);
+    const snapshot = observedHumanVoice(guild);
+    state.channelId = 'new';
+    resolve({ user: { bot: false } });
+    expect(await snapshot).toEqual([{ userId: 'human', channelId: 'old' }]);
+  });
   it('fails closed rather than deleting stored sessions when identity cannot be verified', async () => {
     const { guild } = fixture([{ id: 'unknown', channelId: 'voice', member: null }], vi.fn().mockRejectedValue(new Error('no member intent')));
     expect(await observedHumanVoice(guild)).toBeNull();

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { hourStart, voiceSlices, type AnalyticsRepository } from './repository.js';
 import { AnalyticsService } from './service.js';
 import type { PermissionService } from '../../core/permissions/permission-service.js';
-import type { ModuleService } from '../../services/module-service.js';
+import { ModuleService } from '../../services/module-service.js';
 
 const at = new Date('2025-01-01T00:59:58.000Z');
 describe('analytics UTC allocation and privacy boundaries', () => {
@@ -35,6 +35,20 @@ describe('analytics UTC allocation and privacy boundaries', () => {
     expect(await service.recordCommand('g', 'i', 'ping', true, 23, now)).toBe(false);
     for (const method of ['message', 'member', 'voice', 'command'] as const) expect(repository[method]).not.toHaveBeenCalled();
   });
+  it('never credits a persisted pre-restart voice session before a fresh guild baseline', async () => {
+    const voice = vi.fn(async () => true);
+    const baselineVoice = vi.fn(async () => true);
+    const reconcileVoice = vi.fn(async () => 1);
+    const modules = { isEnabled: vi.fn(async () => true) } as unknown as ModuleService;
+    const service = new AnalyticsService({ voice, baselineVoice, reconcileVoice } as unknown as AnalyticsRepository, {} as PermissionService, modules);
+    const now = new Date();
+    expect(await service.recordVoice('guild', 'human', 'B', now)).toBe(true);
+    expect(baselineVoice).toHaveBeenCalledWith('guild', 'human', 'B', now);
+    expect(voice).not.toHaveBeenCalled();
+    await service.reconcileVoice('guild', [{ userId: 'human', channelId: 'B' }], now);
+    expect(await service.recordVoice('guild', 'human', 'B', new Date(now.getTime() + 1000))).toBe(true);
+    expect(voice).toHaveBeenCalledTimes(1);
+  });
   it('reconciles and heartbeats only enabled guilds with exact live snapshots', async () => {
     const reconcileVoice = vi.fn().mockResolvedValue(1);
     const heartbeat = vi.fn().mockResolvedValue(1);
@@ -49,8 +63,44 @@ describe('analytics UTC allocation and privacy boundaries', () => {
     expect(heartbeat).not.toHaveBeenCalled();
     expect(await service.reconcileVoice('enabled', live, now)).toBe(1);
     expect(await service.heartbeat('enabled', live, now, 5)).toBe(1);
-    expect(reconcileVoice).toHaveBeenCalledExactlyOnceWith('enabled', live, now);
-    expect(heartbeat).toHaveBeenCalledExactlyOnceWith('enabled', live, now, 5);
+    expect(reconcileVoice).toHaveBeenCalledExactlyOnceWith('enabled', live, now, now, 0);
+    expect(heartbeat).toHaveBeenCalledExactlyOnceWith('enabled', live, now, 5, now, now, 0);
+  });
+  it('defers readiness after failed or incomplete recovery and retries without charging stale time', async () => {
+    const baselineVoice = vi.fn(async () => true);
+    const voice = vi.fn(async () => true);
+    const reconcileVoice = vi.fn().mockRejectedValueOnce(new Error('incomplete snapshot')).mockResolvedValueOnce(1);
+    const service = new AnalyticsService({ baselineVoice, voice, reconcileVoice } as unknown as AnalyticsRepository,
+      {} as PermissionService, { isEnabled: vi.fn(async () => true) } as unknown as ModuleService);
+    const at = new Date();
+    await expect(service.reconcileVoice('guild', [{ userId: 'human', channelId: 'A' }], at)).rejects.toThrow('incomplete snapshot');
+    expect(service.isVoiceReady('guild')).toBe(false);
+    await service.recordVoice('guild', 'human', 'B', new Date(at.getTime() + 1000));
+    expect(baselineVoice).toHaveBeenCalledTimes(1);
+    expect(voice).not.toHaveBeenCalled();
+    await service.reconcileVoice('guild', [{ userId: 'human', channelId: 'B' }], new Date(at.getTime() + 2000));
+    expect(service.isVoiceReady('guild')).toBe(true);
+  });
+  it('invalidates voice readiness across generic, slash and dashboard module toggles', async () => {
+    let enabled = true;
+    const modules = new ModuleService({ getModuleState: vi.fn(async () => enabled),
+      setModuleState: vi.fn(async (_guild, _key, value: boolean) => { enabled = value; }),
+      listModuleStates: vi.fn(async () => []) } as never,
+    [{ key: 'core', defaultEnabled: true }, { key: 'analytics', defaultEnabled: false }]);
+    const repository = { reconcileVoice: vi.fn(async () => 1), baselineVoice: vi.fn(async () => true),
+      voice: vi.fn(async () => true) } as unknown as AnalyticsRepository;
+    const service = new AnalyticsService(repository, {} as PermissionService, modules);
+    const at = new Date();
+    await service.reconcileVoice('guild', [{ userId: 'human', channelId: 'A' }], at);
+    expect(service.isVoiceReady('guild')).toBe(true);
+    await modules.setEnabled('guild', 'analytics', false, 'actor');
+    expect(service.isVoiceReady('guild')).toBe(false);
+    await modules.setEnabled('guild', 'analytics', true, 'actor');
+    expect(await service.recordVoice('guild', 'human', 'A', new Date(at.getTime() + 1000))).toBe(true);
+    expect(repository.baselineVoice).toHaveBeenCalledTimes(1);
+    expect(repository.voice).not.toHaveBeenCalled();
+    await service.reconcileVoice('guild', [{ userId: 'human', channelId: 'A' }], new Date(at.getTime() + 2000));
+    expect(service.isVoiceReady('guild')).toBe(true);
   });
   it('validates range and timezone before querying and preserves guild scope and UTC boundaries', async () => {
     const summary = vi.fn().mockResolvedValue({ guildId: 'guild-a', trend: [], localDays: [], details: {} });

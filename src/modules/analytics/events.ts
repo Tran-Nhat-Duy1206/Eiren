@@ -22,15 +22,19 @@ export const analyticsEvents: BotEvent[] = [
       const previous = before as VoiceState;
       const next = after as VoiceState;
       if (!next?.guild?.id || !next.id) return;
+      // Capture ingress before any targeted REST lookup; delayed classification cannot invent later activity.
+      const observedAt = new Date();
       let member = next.member ?? previous?.member;
       if (!member) {
         try { member = await next.guild.members.fetch({ user: next.id, force: true }); }
-        catch { return; } // Do not classify an unknown voice participant as a human.
+        catch { await services.analytics.fenceUnknownVoice(next.guild.id, next.id, observedAt); return; }
+        // Unknown identity is fenced as absent; it is never classified or credited as human.
       }
-      if (!member || member.user.bot) return;
+      if (!member) { await services.analytics.fenceUnknownVoice(next.guild.id, next.id, observedAt); return; }
+      if (member.user.bot) return;
       // AFK channel time is not activity; self-muted/deafened humans are still connected.
       const channelId = next.channelId === next.guild.afkChannelId ? null : next.channelId;
       if ((previous.channelId === next.guild.afkChannelId ? null : previous.channelId) === channelId) return;
-      await services.analytics.recordVoice(next.guild.id, next.id, channelId, new Date());
+      await services.analytics.recordVoice(next.guild.id, next.id, channelId, observedAt);
     } },
 ];
