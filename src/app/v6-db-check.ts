@@ -179,6 +179,88 @@ try {
     time(6170_000), time(6180_000));
   await realGated.heartbeat(guildId, [{ userId: 'toggle-fence', channelId: 'toggle-fence' }], time(6185_000));
   assert('dbToggleFreshInterval', await seconds('toggle-fence') === 5);
+  stage = 'opposite-commit-order';
+  const pendingLeaveAt = time(6201_000);
+  const pendingBaseline = time(6202_000);
+  await analytics.voice(guildId, 'delayed-leave', 'A-delayed', time(6190_000));
+  const boundary = { ...(await analytics.voiceBoundary(guildId))!, cutoff: time(6200_000) };
+  const captured = [{ userId: 'delayed-leave', channelId: 'A-delayed' }];
+  const leaveReservation = (await analytics.reserveVoice(guildId, 'delayed-leave', pendingLeaveAt, time(6199_000)))!;
+  let releaseLeave!: () => void;
+  const leaveBarrier = new Promise<void>(resolve => { releaseLeave = resolve; });
+  const delayedLeave = (async () => { await leaveBarrier; return analytics.finalizeVoice(leaveReservation, null, time(6203_000)); })();
+  await analytics.reconcileVoice(guildId, captured, boundary.cutoff, pendingBaseline, boundary.epoch, boundary.sequence);
+  assert('pendingLeaveFencesSnapshot', (await db.select().from(voice).where(and(eq(voice.guildId, guildId),
+    eq(voice.userId, 'delayed-leave'))))[0]?.pending === true);
+  releaseLeave();
+  const appliedLeave = await delayedLeave;
+  assert('delayedLeaveAfterSnapshotMustDisconnect', appliedLeave &&
+    (await db.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, 'delayed-leave'))))[0]?.channelId === null);
+  const delayedRejoin = (await analytics.reserveVoice(guildId, 'delayed-leave', time(6210_000), time(6210_000)))!;
+  await analytics.finalizeVoice(delayedRejoin, 'A-delayed', time(6211_000));
+  assert('noVoiceSecondsAcrossDelayedLeaveAndRejoin', await seconds('A-delayed') === 0);
+  const orderedBoundary = async (cutoff: Date) => ({ ...(await analytics.voiceBoundary(guildId))!, cutoff });
+  await analytics.voice(guildId, 'delayed-move', 'A-late-move', time(6210_000));
+  const moveBoundary = await orderedBoundary(time(6220_000));
+  const moveReservation = (await analytics.reserveVoice(guildId, 'delayed-move', time(6221_000), time(6219_000)))!;
+  await analytics.reconcileVoice(guildId, [{ userId: 'delayed-move', channelId: 'A-late-move' }],
+    moveBoundary.cutoff, time(6222_000), moveBoundary.epoch, moveBoundary.sequence);
+  assert('pendingMoveFencesSnapshot', (await db.select().from(voice).where(and(eq(voice.guildId, guildId),
+    eq(voice.userId, 'delayed-move'))))[0]?.pending === true);
+  await analytics.finalizeVoice(moveReservation, 'B-late-move', time(6223_000));
+  assert('delayedMoveAfterSnapshotWins', (await db.select().from(voice).where(and(eq(voice.guildId, guildId),
+    eq(voice.userId, 'delayed-move'))))[0]?.channelId === 'B-late-move' && await seconds('A-late-move') === 0);
+  const joinBoundary = await orderedBoundary(time(6240_000));
+  const joinReservation = (await analytics.reserveVoice(guildId, 'delayed-join', time(6241_000), time(6239_000)))!;
+  await analytics.reconcileVoice(guildId, [], joinBoundary.cutoff, time(6242_000), joinBoundary.epoch, joinBoundary.sequence);
+  await analytics.finalizeVoice(joinReservation, 'B-late-join', time(6243_000));
+  assert('delayedJoinAfterAbsentSnapshotWins', (await db.select().from(voice).where(and(eq(voice.guildId, guildId),
+    eq(voice.userId, 'delayed-join'))))[0]?.channelId === 'B-late-join');
+  const pendingOld = (await analytics.reserveVoice(guildId, 'superseded', time(6251_000), time(6251_000)))!;
+  const pendingNew = (await analytics.reserveVoice(guildId, 'superseded', time(6252_000), time(6252_000)))!;
+  await analytics.finalizeVoice(pendingNew, 'B-superseded', time(6253_000));
+  assert('laterJoinSupersedesPendingLeave', !await analytics.finalizeVoice(pendingOld, null, time(6254_000)) &&
+    (await db.select().from(voice).where(and(eq(voice.guildId, guildId),
+      eq(voice.userId, 'superseded'))))[0]?.channelId === 'B-superseded');
+  const reorderedOld = (await analytics.reserveVoice(guildId, 'old-finalizer', time(6261_000), time(6261_000)))!;
+  const reorderedNew = (await analytics.reserveVoice(guildId, 'old-finalizer', time(6262_000), time(6262_000)))!;
+  await analytics.finalizeVoice(reorderedNew, 'B-newest', time(6263_000));
+  assert('olderDelayedFinalizationRejected', !await analytics.finalizeVoice(reorderedOld, 'A-older', time(6264_000)) &&
+    (await db.select().from(voice).where(and(eq(voice.guildId, guildId),
+      eq(voice.userId, 'old-finalizer'))))[0]?.channelId === 'B-newest');
+  const staleEpochBoundary = await orderedBoundary(time(6270_000));
+  const staleEpochEvent = (await analytics.reserveVoice(guildId, 'epoch-event', time(6271_000), time(6271_000)))!;
+  await realModules.setEnabled(guildId, 'analytics', false, 'synthetic');
+  await realModules.setEnabled(guildId, 'analytics', true, 'synthetic');
+  assert('oldEpochPendingEventRejected', !await analytics.finalizeVoice(staleEpochEvent, 'old-epoch-channel', time(6272_000)) &&
+    await analytics.reconcileVoice(guildId, [], staleEpochBoundary.cutoff, time(6273_000),
+      staleEpochBoundary.epoch, staleEpochBoundary.sequence) === -1);
+  const freshEpochBoundary = await orderedBoundary(time(6280_000));
+  await analytics.reconcileVoice(guildId, [], freshEpochBoundary.cutoff, time(6281_000),
+    freshEpochBoundary.epoch, freshEpochBoundary.sequence);
+  assert('newEpochClearsOldPendingFence', (await db.select().from(voice).where(and(eq(voice.guildId, guildId),
+    eq(voice.userId, 'epoch-event'))))[0]?.pending === false);
+  await analytics.voice(guildId, 'pending-before-boundary', 'A-pending-first', time(6282_000));
+  const beforeBoundary = (await analytics.reserveVoice(guildId, 'pending-before-boundary', time(6283_000), time(6283_000)))!;
+  const laterBoundary = await orderedBoundary(time(6284_000));
+  await analytics.reconcileVoice(guildId, [{ userId: 'pending-before-boundary', channelId: 'A-pending-first' }],
+    laterBoundary.cutoff, time(6285_000), laterBoundary.epoch, laterBoundary.sequence);
+  await analytics.heartbeat(guildId, [{ userId: 'pending-before-boundary', channelId: 'A-pending-first' }],
+    laterBoundary.cutoff, 1000, time(6285_000), undefined, laterBoundary.epoch, laterBoundary.sequence);
+  assert('snapshotAfterReservationCannotOverwritePending', (await db.select().from(voice).where(and(eq(voice.guildId, guildId),
+    eq(voice.userId, 'pending-before-boundary'))))[0]?.pending === true && await seconds('A-pending-first') === 0);
+  await analytics.finalizeVoice(beforeBoundary, 'B-pending-first', time(6286_000));
+  assert('pendingEventFinalizesAfterNewerSnapshot', (await db.select().from(voice).where(and(eq(voice.guildId, guildId),
+    eq(voice.userId, 'pending-before-boundary'))))[0]?.channelId === 'B-pending-first');
+  await analytics.voice(guildId, 'sequence-vs-time', 'A-sequence', time(6290_000));
+  const seqBoundary = await orderedBoundary(time(6300_000));
+  const newerSeq = (await analytics.reserveVoice(guildId, 'sequence-vs-time', time(6301_000), time(6299_000)))!;
+  await analytics.finalizeVoice(newerSeq, 'B-sequence', time(6299_000));
+  await analytics.reconcileVoice(guildId, [{ userId: 'sequence-vs-time', channelId: 'A-sequence' }],
+    seqBoundary.cutoff, time(6302_000), seqBoundary.epoch, seqBoundary.sequence);
+  assert('finalizedEventSequenceBeatsEarlierSnapshotDespiteOldTimestamp',
+    (await db.select().from(voice).where(and(eq(voice.guildId, guildId),
+      eq(voice.userId, 'sequence-vs-time'))))[0]?.channelId === 'B-sequence');
   stage = 'commands';
   assert('commandAccepted', await analytics.command(guildId, `cmd-${id}`, 'check', false, 11, time(1000)));
   assert('commandDedupeAndAggregate', !await analytics.command(guildId, `cmd-${id}`, 'check', true, 99, time(1000)) &&

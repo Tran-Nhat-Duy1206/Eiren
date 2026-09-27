@@ -183,10 +183,11 @@ async function reconcileAnalyticsVoice() {
     for (const guild of [...client.guilds.cache.values()].slice(0, 5)) {
       try {
         if (!await modules.isEnabled(guild.id, 'analytics')) continue;
-        const epoch = await modules.voiceEpoch(guild.id);
-        const cutoff = new Date();
+        const boundary = await analytics.voiceBoundary(guild.id);
+        if (!boundary) continue;
         const live = await observedHumanVoice(guild);
-        if (live !== null) await analytics.reconcileVoice(guild.id, live, cutoff, new Date(), epoch);
+        if (live !== null) await analytics.reconcileVoice(guild.id, live, boundary.cutoff, new Date(),
+          boundary.epoch, boundary.sequence);
         else logger.warn({ guildId: guild.id }, 'Incomplete voice snapshot; analytics recovery deferred');
       } catch (error) { logger.warn({ guildId: guild.id, errorType: error instanceof Error ? error.name : 'unknown' },
         'Voice analytics restart reconciliation failed; stale time is not counted'); }
@@ -212,14 +213,16 @@ async function analyticsDue() {
     const guild = guildList[analyticsGuildCursor++ % guildList.length]!;
     const enabled = await runStage('analytics.moduleCheck', () => modules.isEnabled(guild.id, 'analytics'));
     if (!enabled) { analytics.invalidateVoice(guild.id); continue; }
-    const epoch = await runStage('analytics.voiceEpoch', () => modules.voiceEpoch(guild.id));
-    const cutoff = new Date();
+    const boundary = await runStage('analytics.voiceBoundary', () => analytics.voiceBoundary(guild.id));
+    if (!boundary) { analytics.invalidateVoice(guild.id); continue; }
     const live = await runStage('analytics.observedHumanVoice', () => observedHumanVoice(guild));
     if (live === null) continue;
     const baselineAt = new Date();
     if (!analytics.isVoiceReady(guild.id)) {
-      await runStage('analytics.reconcileVoice', () => analytics.reconcileVoice(guild.id, live, cutoff, baselineAt, epoch));
-    } else await runStage('analytics.heartbeat', () => analytics.heartbeat(guild.id, live, cutoff, 1000, baselineAt));
+      await runStage('analytics.reconcileVoice', () => analytics.reconcileVoice(guild.id, live, boundary.cutoff,
+        baselineAt, boundary.epoch, boundary.sequence));
+    } else await runStage('analytics.heartbeat', () => analytics.heartbeat(guild.id, live, boundary.cutoff,
+      1000, baselineAt, boundary.sequence));
   }
 }
 const v5Scheduler = new V5Scheduler([

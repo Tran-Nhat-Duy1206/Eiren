@@ -1,11 +1,29 @@
 import { AppError } from '../../core/errors/errors.js';
 import type { Actor, PermissionService } from '../../core/permissions/permission-service.js';
 import type { ModuleService } from '../../services/module-service.js';
-import { AnalyticsRepository, rangeHours, type AnalyticsRange } from './repository.js';
+import { AnalyticsRepository, rangeHours, type AnalyticsRange, type VoiceReservation } from './repository.js';
 
 export class AnalyticsService {
   private readonly voiceReady = new Map<string, { at: Date; epoch: number }>();
   private readonly voiceGeneration = new Map<string, number>();
+  private readonly ingressTails = new Map<string, Promise<void>>();
+  /** Preserve this gateway process's observation order while PostgreSQL remains authoritative. */
+  reserveVoiceObservation(guildId: string, userId: string, observedAt: Date): Promise<VoiceReservation | null> {
+    this.validate(observedAt);
+    const previous = this.ingressTails.get(guildId) ?? Promise.resolve();
+    const reservation = previous.then(() => this.repository.reserveVoice(guildId, userId, observedAt));
+    const settled = reservation.then(() => {}, () => {});
+    this.ingressTails.set(guildId, settled);
+    void settled.then(() => { if (this.ingressTails.get(guildId) === settled) this.ingressTails.delete(guildId); });
+    return reservation;
+  }
+  async voiceBoundary(guildId: string) {
+    await this.ingressTails.get(guildId);
+    return this.repository.voiceBoundary(guildId);
+  }
+  async finalizeVoiceObservation(reservation: VoiceReservation, channelId: string | null) {
+    return this.repository.finalizeVoice(reservation, channelId);
+  }
   /** Invalidated after every analytics module write, including an idempotent toggle. */
   invalidateVoice(guildId: string) {
     this.voiceReady.delete(guildId);
@@ -81,21 +99,22 @@ export class AnalyticsService {
   }
   async runDue(now = new Date(), limit = 500) { return this.repository.prune(now, limit); }
   async reconcileVoice(guildId: string, live: readonly { userId: string; channelId: string }[], cutoff = new Date(),
-    baselineAt = cutoff, observedEpoch?: number) {
+    baselineAt = cutoff, observedEpoch?: number, observationBoundary = 0) {
     const generation = this.voiceGeneration.get(guildId) ?? 0;
     const epoch = observedEpoch ?? await this.modules.voiceEpoch?.(guildId) ?? 0;
     if (!await this.modules.isEnabled(guildId, 'analytics')) { this.invalidateVoice(guildId); return 0; }
-    const count = await this.repository.reconcileVoice(guildId, live, cutoff, baselineAt, epoch);
+    const count = await this.repository.reconcileVoice(guildId, live, cutoff, baselineAt, epoch, observationBoundary);
     if (count >= 0 && generation === (this.voiceGeneration.get(guildId) ?? 0) &&
       await this.modules.isEnabled(guildId, 'analytics')) this.voiceReady.set(guildId, { at: baselineAt, epoch });
     return Math.max(0, count);
   }
-  async heartbeat(guildId: string, live: readonly { userId: string; channelId: string }[], now = new Date(), limit = 1000, baselineAt = now) {
+  async heartbeat(guildId: string, live: readonly { userId: string; channelId: string }[], now = new Date(), limit = 1000,
+    baselineAt = now, observationBoundary = 0) {
     if (!this.isVoiceReady(guildId)) return 0;
     if (!await this.modules.isEnabled(guildId, 'analytics')) { this.invalidateVoice(guildId); return 0; }
     if (!this.isVoiceReady(guildId)) return 0;
     const count = await this.repository.heartbeat(guildId, live, now, limit, baselineAt,
-      this.voiceReady.get(guildId)?.at, this.voiceReady.get(guildId)?.epoch);
+      this.voiceReady.get(guildId)?.at, this.voiceReady.get(guildId)?.epoch, observationBoundary);
     if (count < 0) { this.invalidateVoice(guildId); return 0; }
     return count;
   }

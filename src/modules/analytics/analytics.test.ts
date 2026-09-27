@@ -63,8 +63,8 @@ describe('analytics UTC allocation and privacy boundaries', () => {
     expect(heartbeat).not.toHaveBeenCalled();
     expect(await service.reconcileVoice('enabled', live, now)).toBe(1);
     expect(await service.heartbeat('enabled', live, now, 5)).toBe(1);
-    expect(reconcileVoice).toHaveBeenCalledExactlyOnceWith('enabled', live, now, now, 0);
-    expect(heartbeat).toHaveBeenCalledExactlyOnceWith('enabled', live, now, 5, now, now, 0);
+    expect(reconcileVoice).toHaveBeenCalledExactlyOnceWith('enabled', live, now, now, 0, 0);
+    expect(heartbeat).toHaveBeenCalledExactlyOnceWith('enabled', live, now, 5, now, now, 0, 0);
   });
   it('defers readiness after failed or incomplete recovery and retries without charging stale time', async () => {
     const baselineVoice = vi.fn(async () => true);
@@ -101,6 +101,28 @@ describe('analytics UTC allocation and privacy boundaries', () => {
     expect(repository.voice).not.toHaveBeenCalled();
     await service.reconcileVoice('guild', [{ userId: 'human', channelId: 'A' }], new Date(at.getTime() + 2000));
     expect(service.isVoiceReady('guild')).toBe(true);
+  });
+  it('reserves gateway ingress in observation order before a snapshot boundary', async () => {
+    let releaseFirst!: () => void;
+    const firstBarrier = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const calls: string[] = [];
+    const reserveVoice = vi.fn(async (_guild: string, userId: string, observedAt: Date) => {
+      calls.push(`reserve:${userId}`);
+      if (userId === 'first') await firstBarrier;
+      return { guildId: 'guild', userId, observedAt, epoch: 1, sequence: calls.length };
+    });
+    const voiceBoundary = vi.fn(async () => { calls.push('boundary'); return { epoch: 1, sequence: 2, cutoff: new Date() }; });
+    const service = new AnalyticsService({ reserveVoice, voiceBoundary } as unknown as AnalyticsRepository,
+      {} as PermissionService, {} as ModuleService);
+    const now = new Date();
+    const first = service.reserveVoiceObservation('guild', 'first', now);
+    const second = service.reserveVoiceObservation('guild', 'second', now);
+    const snapshot = service.voiceBoundary('guild');
+    await Promise.resolve();
+    expect(calls).toEqual(['reserve:first']);
+    releaseFirst();
+    await Promise.all([first, second, snapshot]);
+    expect(calls).toEqual(['reserve:first', 'reserve:second', 'boundary']);
   });
   it('validates range and timezone before querying and preserves guild scope and UTC boundaries', async () => {
     const summary = vi.fn().mockResolvedValue({ guildId: 'guild-a', trend: [], localDays: [], details: {} });

@@ -30,6 +30,8 @@ export const guildModules = pgTable('guild_modules', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   // Monotonic epoch separates rapid disable/re-enable transitions even within one millisecond.
   version: integer('version').notNull().default(0),
+  // The analytics row serializes gateway observations and pre-snapshot boundaries.
+  voiceSequence: bigint('voice_sequence', { mode: 'number' }).notNull().default(0),
 }, table => [primaryKey({ columns: [table.guildId, table.moduleKey] })]);
 
 export const guildPermissionRoles = pgTable('guild_permission_roles', {
@@ -651,6 +653,10 @@ export const analyticsActiveVoiceSessions = pgTable('analytics_active_voice_sess
   channelId: text('channel_id'),
   joinedAt: timestamp('joined_at', { withTimezone: true }).notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+  observationSeq: bigint('observation_seq', { mode: 'number' }).notNull().default(0),
+  observationEpoch: integer('observation_epoch').notNull().default(0),
+  // Pending ingress prevents credit immediately; classification/finalization happens later.
+  pending: boolean('pending').notNull().default(false),
 }, table => [primaryKey({ columns: [table.guildId, table.userId] }),
   index('analytics_active_voice_updated_idx').on(table.updatedAt)]);
 

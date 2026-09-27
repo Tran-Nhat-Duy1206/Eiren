@@ -1,4 +1,4 @@
-import { and, eq, gte, isNotNull, lt, notInArray, sql } from 'drizzle-orm';
+import { and, eq, gte, isNotNull, lt, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { Database } from '../../core/database/connection.js';
 import { analyticsSettings, analyticsGuildHourly as guildHour, analyticsChannelHourly as channelHour,
   analyticsCommandHourly as commandHour, analyticsEventDedupe as dedupe, analyticsMemberState as members,
@@ -8,6 +8,8 @@ export type AnalyticsRange = '24h' | '7d' | '30d' | '90d';
 export const rangeHours: Record<AnalyticsRange, number> = { '24h': 24, '7d': 168, '30d': 720, '90d': 2160 };
 export const hourStart = (at: Date) => new Date(Math.floor(at.getTime() / 3600000) * 3600000);
 export type VoiceSlice = { bucketStart: Date; seconds: number };
+export type VoiceReservation = { guildId: string; userId: string; epoch: number; sequence: number; observedAt: Date };
+export type VoiceBoundary = { epoch: number; sequence: number; cutoff: Date };
 /** Whole-second intervals are apportioned by UTC hour; subsecond residuals are deliberately discarded. */
 export function voiceSlices(start: Date, end: Date): VoiceSlice[] {
   const result: VoiceSlice[] = [];
@@ -80,16 +82,64 @@ export class AnalyticsRepository {
     });
   }
   private async voiceModuleState(tx: Parameters<Parameters<Database['transaction']>[0]>[0], guildId: string) {
-    const [state] = await tx.select({ enabled: guildModules.enabled, version: guildModules.version }).from(guildModules)
+    const [state] = await tx.select({ enabled: guildModules.enabled, version: guildModules.version,
+      voiceSequence: guildModules.voiceSequence }).from(guildModules)
       .where(and(eq(guildModules.guildId, guildId), eq(guildModules.moduleKey, 'analytics')));
     return state;
+  }
+  /** Short transaction: durable sequence boundary, obtained before observing Discord state. */
+  async voiceBoundary(guildId: string): Promise<VoiceBoundary | null> {
+    return this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
+      const state = await this.voiceModuleState(tx, guildId);
+      return state?.enabled ? { epoch: state.version, sequence: state.voiceSequence, cutoff: new Date() } : null;
+    });
+  }
+  /** Reserve before any REST/classification await; pending rows are no-credit fences. */
+  async reserveVoice(guildId: string, userId: string, observedAt: Date, reservedAt = new Date()): Promise<VoiceReservation | null> {
+    return this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
+      const [clock] = await tx.update(guildModules).set({ voiceSequence: sql`${guildModules.voiceSequence} + 1` })
+        .where(and(eq(guildModules.guildId, guildId), eq(guildModules.moduleKey, 'analytics'), eq(guildModules.enabled, true)))
+        .returning({ epoch: guildModules.version, sequence: guildModules.voiceSequence });
+      if (!clock) return null;
+      if (!Number.isSafeInteger(clock.sequence)) throw new Error('Voice observation sequence exhausted');
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), hashtext(${userId}))`);
+      await tx.insert(voice).values({ guildId, userId, channelId: null, joinedAt: reservedAt, updatedAt: reservedAt,
+        observationSeq: clock.sequence, observationEpoch: clock.epoch, pending: true })
+        .onConflictDoUpdate({ target: [voice.guildId, voice.userId], set: {
+          channelId: null, joinedAt: reservedAt, updatedAt: sql`GREATEST(${voice.updatedAt}, ${reservedAt})`,
+          observationSeq: clock.sequence, observationEpoch: clock.epoch, pending: true } });
+      return { guildId, userId, observedAt, epoch: clock.epoch, sequence: clock.sequence };
+    });
+  }
+  /** Finalization may be delayed, but it can only complete its own current reservation. */
+  async finalizeVoice(reservation: VoiceReservation, channelId: string | null, finalizedAt = new Date()) {
+    const { guildId, userId, epoch, sequence } = reservation;
+    return this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
+      const module = await this.voiceModuleState(tx, guildId);
+      if (!module?.enabled || module.version !== epoch) return false;
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), hashtext(${userId}))`);
+      const [old] = await tx.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
+      if (!old?.pending || old.observationEpoch !== epoch || old.observationSeq !== sequence) return false;
+      const baseline = new Date(Math.max(finalizedAt.getTime(), old.updatedAt.getTime()));
+      await tx.update(voice).set({ channelId, joinedAt: baseline, updatedAt: baseline, pending: false })
+        .where(and(eq(voice.guildId, guildId), eq(voice.userId, userId), eq(voice.observationSeq, sequence),
+          eq(voice.observationEpoch, epoch), eq(voice.pending, true)));
+      return true;
+    });
+  }
+  private snapshotEligible(cutoff: Date, epoch: number, boundary: number) {
+    return and(lt(voice.updatedAt, cutoff), or(ne(voice.observationEpoch, epoch),
+      and(eq(voice.pending, false), lte(voice.observationSeq, boundary))));
   }
   private async voiceIn(tx: Parameters<Parameters<Database['transaction']>[0]>[0], guildId: string,
     userId: string, channelId: string | null, at: Date, readyAt?: Date) {
     // Every voice writer acquires the guild lock first, then the member lock, including snapshots.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), hashtext(${userId}))`);
     const [old] = await tx.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
-    if (old && at <= old.updatedAt) return false;
+    if (old && (old.pending || at <= old.updatedAt)) return false;
     if (old?.channelId && (!readyAt || old.updatedAt >= readyAt) && at.getTime() - old.updatedAt.getTime() <= 600000) {
       for (const slice of voiceSlices(old.updatedAt, at)) {
         await tx.insert(guildHour).values({ guildId, bucketStart: slice.bucketStart, voiceSeconds: slice.seconds })
@@ -109,7 +159,7 @@ export class AnalyticsRepository {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), hashtext(${userId}))`);
     const rows = await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: at, updatedAt: at })
       .onConflictDoUpdate({ target: [voice.guildId, voice.userId],
-        set: { channelId, joinedAt: at, updatedAt: at }, setWhere: sql`${voice.updatedAt} < ${at}` })
+        set: { channelId, joinedAt: at, updatedAt: at }, setWhere: sql`${voice.updatedAt} < ${at} AND NOT ${voice.pending}` })
       .returning({ userId: voice.userId });
     return rows.length !== 0;
   }
@@ -134,21 +184,26 @@ export class AnalyticsRepository {
   }
   /** The cutoff precedes snapshot collection; the later baseline never licenses touching newer gateway rows. */
   async reconcileVoice(guildId: string, live: readonly { userId: string; channelId: string }[], cutoff: Date,
-    baselineAt = cutoff, observedEpoch?: number) {
+    baselineAt = cutoff, observedEpoch?: number, observationBoundary = 0) {
     if (live.length > 1000 || baselineAt < cutoff) throw new Error('Invalid voice reconciliation boundary');
     const unique = new Map(live.map(item => [item.userId, item.channelId]));
     const applied = await this.db.transaction(async tx => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
       const module = await this.voiceModuleState(tx, guildId);
       if (module?.enabled === false || (observedEpoch !== undefined && (module?.version ?? 0) !== observedEpoch)) return false;
-      // Tombstones preserve newer leaves; never charge pre-restart or unobserved time.
-      await tx.update(voice).set({ channelId: null, joinedAt: baselineAt, updatedAt: baselineAt }).where(and(
-        eq(voice.guildId, guildId), lt(voice.updatedAt, cutoff), isNotNull(voice.channelId),
+      const epoch = module?.version ?? 0;
+      // Pending reservations and observations beyond the pre-snapshot boundary always win.
+      await tx.update(voice).set({ channelId: null, joinedAt: baselineAt, updatedAt: baselineAt,
+        observationSeq: observationBoundary, observationEpoch: epoch, pending: false }).where(and(
+        eq(voice.guildId, guildId), this.snapshotEligible(cutoff, epoch, observationBoundary),
+        or(isNotNull(voice.channelId), ne(voice.observationEpoch, epoch)),
         ...(unique.size ? [notInArray(voice.userId, [...unique.keys()])] : [])));
       for (const [userId, channelId] of unique) {
-        await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: baselineAt, updatedAt: baselineAt })
-          .onConflictDoUpdate({ target: [voice.guildId, voice.userId], set: { channelId, joinedAt: baselineAt, updatedAt: baselineAt },
-            setWhere: sql`${voice.updatedAt} < ${cutoff}` });
+        await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: baselineAt, updatedAt: baselineAt,
+          observationSeq: observationBoundary, observationEpoch: epoch, pending: false })
+          .onConflictDoUpdate({ target: [voice.guildId, voice.userId], set: { channelId, joinedAt: baselineAt, updatedAt: baselineAt,
+            observationSeq: observationBoundary, observationEpoch: epoch, pending: false },
+            setWhere: this.snapshotEligible(cutoff, epoch, observationBoundary) });
       }
       return true;
     });
@@ -156,7 +211,7 @@ export class AnalyticsRepository {
   }
   /** One guild-locked transaction: only matching, older active sessions accrue observed time. */
   async heartbeat(guildId: string, live: readonly { userId: string; channelId: string }[], cutoff: Date,
-    limit = 1000, baselineAt = cutoff, readyAt?: Date, readyEpoch?: number) {
+    limit = 1000, baselineAt = cutoff, readyAt?: Date, readyEpoch?: number, observationBoundary = 0) {
     const cap = Math.min(1000, Math.max(1, limit));
     if (live.length > cap || baselineAt < cutoff) throw new Error('Voice heartbeat exceeds limit or has invalid boundary');
     const unique = new Map(live.map(item => [item.userId, item.channelId]));
@@ -164,20 +219,29 @@ export class AnalyticsRepository {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
       const module = await this.voiceModuleState(tx, guildId);
       if (module?.enabled === false || (readyEpoch !== undefined && (module?.version ?? 0) !== readyEpoch)) return -1;
+      const epoch = module?.version ?? 0;
       for (const [userId, channelId] of unique) {
         const [old] = await tx.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
-        if (old && old.updatedAt >= cutoff) continue; // newer event (including a leave tombstone) wins.
-        if (old?.channelId === channelId && (!readyAt || old.updatedAt >= readyAt)) {
+        if (old && (old.updatedAt >= cutoff || (old.observationEpoch === epoch &&
+          (old.pending || old.observationSeq > observationBoundary)))) continue;
+        if (old?.channelId === channelId && old.observationEpoch === epoch && (!readyAt || old.updatedAt >= readyAt)) {
           await this.voiceIn(tx, guildId, userId, channelId, cutoff, readyAt);
+          await tx.update(voice).set({ observationSeq: observationBoundary, observationEpoch: epoch })
+            .where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
         } else {
           // Snapshot disagrees with the last observed channel: reset, never attribute an uncertain interval.
-          await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: baselineAt, updatedAt: baselineAt })
+          await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: baselineAt, updatedAt: baselineAt,
+            observationSeq: observationBoundary, observationEpoch: epoch, pending: false })
             .onConflictDoUpdate({ target: [voice.guildId, voice.userId],
-              set: { channelId, joinedAt: baselineAt, updatedAt: baselineAt }, setWhere: sql`${voice.updatedAt} < ${cutoff}` });
+              set: { channelId, joinedAt: baselineAt, updatedAt: baselineAt,
+                observationSeq: observationBoundary, observationEpoch: epoch, pending: false },
+              setWhere: this.snapshotEligible(cutoff, epoch, observationBoundary) });
         }
       }
-      await tx.update(voice).set({ channelId: null, joinedAt: baselineAt, updatedAt: baselineAt }).where(and(
-        eq(voice.guildId, guildId), lt(voice.updatedAt, cutoff), isNotNull(voice.channelId),
+      await tx.update(voice).set({ channelId: null, joinedAt: baselineAt, updatedAt: baselineAt,
+        observationSeq: observationBoundary, observationEpoch: epoch, pending: false }).where(and(
+        eq(voice.guildId, guildId), this.snapshotEligible(cutoff, epoch, observationBoundary),
+        or(isNotNull(voice.channelId), ne(voice.observationEpoch, epoch)),
         ...(unique.size ? [notInArray(voice.userId, [...unique.keys()])] : [])));
       return unique.size;
     });
