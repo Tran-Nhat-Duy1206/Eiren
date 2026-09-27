@@ -1,0 +1,216 @@
+import { and, eq, gte, lt, sql } from 'drizzle-orm';
+import type { Database } from '../../core/database/connection.js';
+import { analyticsSettings, analyticsGuildHourly as guildHour, analyticsChannelHourly as channelHour,
+  analyticsCommandHourly as commandHour, analyticsEventDedupe as dedupe, analyticsMemberState as members,
+  analyticsActiveVoiceSessions as voice,  } from '../../core/database/schema.js';
+
+export type AnalyticsRange = '24h' | '7d' | '30d' | '90d';
+export const rangeHours: Record<AnalyticsRange, number> = { '24h': 24, '7d': 168, '30d': 720, '90d': 2160 };
+export const hourStart = (at: Date) => new Date(Math.floor(at.getTime() / 3600000) * 3600000);
+export type VoiceSlice = { bucketStart: Date; seconds: number };
+/** Whole-second intervals are apportioned by UTC hour; subsecond residuals are deliberately discarded. */
+export function voiceSlices(start: Date, end: Date): VoiceSlice[] {
+  const result: VoiceSlice[] = [];
+  let cursor = Math.ceil(start.getTime() / 1000) * 1000;
+  const stop = Math.floor(end.getTime() / 1000) * 1000;
+  while (cursor < stop) {
+    const bucketStart = hourStart(new Date(cursor));
+    const next = Math.min(stop, bucketStart.getTime() + 3600000);
+    result.push({ bucketStart, seconds: (next - cursor) / 1000 });
+    cursor = next;
+  }
+  return result;
+}
+export class AnalyticsRepository {
+  constructor(private readonly db: Database) {}
+  async settings(guildId: string) {
+    const [row] = await this.db.select().from(analyticsSettings).where(eq(analyticsSettings.guildId, guildId));
+    return row?.retentionDays ?? 180;
+  }
+  async configure(guildId: string, retentionDays: number) {
+    await this.db.insert(analyticsSettings).values({ guildId, retentionDays }).onConflictDoUpdate({ target: analyticsSettings.guildId,
+      set: { retentionDays, updatedAt: new Date() } });
+  }
+  private async stamp(tx: Parameters<Parameters<Database['transaction']>[0]>[0], guildId: string, eventKey: string, at: Date) {
+    const inserted = await tx.insert(dedupe).values({ guildId, eventKey, createdAt: at }).onConflictDoNothing().returning({ eventKey: dedupe.eventKey });
+    return inserted.length !== 0;
+  }
+  async message(guildId: string, messageId: string, channelId: string, at: Date) {
+    return this.db.transaction(async tx => {
+      if (!await this.stamp(tx, guildId, `m:${messageId}`, at)) return false;
+      const bucketStart = hourStart(at);
+      await tx.insert(guildHour).values({ guildId, bucketStart, messages: 1 }).onConflictDoUpdate({ target: [guildHour.guildId, guildHour.bucketStart], set: { messages: sql`${guildHour.messages} + 1` } });
+      await tx.insert(channelHour).values({ guildId, channelId, bucketStart, messages: 1 }).onConflictDoUpdate({ target: [channelHour.guildId, channelHour.channelId, channelHour.bucketStart], set: { messages: sql`${channelHour.messages} + 1` } });
+      return true;
+    });
+  }
+  async member(guildId: string, userId: string, present: boolean, at: Date) {
+    return this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), hashtext(${userId}))`);
+      const [prior] = await tx.select({ present: members.present }).from(members)
+        .where(and(eq(members.guildId, guildId), eq(members.userId, userId)));
+      // An upsert with a conditional WHERE is a cross-process atomic state transition.
+      const changed = await tx.insert(members).values({ guildId, userId, present, lastChangedAt: at })
+        .onConflictDoUpdate({ target: [members.guildId, members.userId], set: { present, lastChangedAt: at },
+          setWhere: sql`${members.present} <> ${present} AND ${members.lastChangedAt} < ${at}` })
+        .returning({ userId: members.userId });
+      if (!changed.length) return false;
+      // A first observed removal is not evidence of an observed join.
+      if (!prior && !present) return false;
+      const bucketStart = hourStart(at);
+      await tx.insert(guildHour).values({ guildId, bucketStart, joins: present ? 1 : 0, leaves: present ? 0 : 1 })
+        .onConflictDoUpdate({ target: [guildHour.guildId, guildHour.bucketStart], set: present
+          ? { joins: sql`${guildHour.joins} + 1` } : { leaves: sql`${guildHour.leaves} + 1` } });
+      return true;
+    });
+  }
+  async command(guildId: string, interactionId: string, commandName: string, failed: boolean, durationMs: number, at: Date) {
+    return this.db.transaction(async tx => {
+      if (!await this.stamp(tx, guildId, `c:${interactionId}`, at)) return false;
+      const bucketStart = hourStart(at);
+      await tx.insert(commandHour).values({ guildId, commandName, bucketStart, invocations: 1, errors: Number(failed), totalDurationMs: durationMs })
+        .onConflictDoUpdate({ target: [commandHour.guildId, commandHour.commandName, commandHour.bucketStart], set: {
+          invocations: sql`${commandHour.invocations} + 1`, errors: sql`${commandHour.errors} + ${Number(failed)}`,
+          totalDurationMs: sql`${commandHour.totalDurationMs} + ${durationMs}` } });
+      return true;
+    });
+  }
+  async voice(guildId: string, userId: string, channelId: string | null, at: Date) {
+    return this.db.transaction(async tx => {
+      // Locks the member even when no session exists; duplicate and reordered gateway updates cannot double count.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), hashtext(${userId}))`);
+      const [old] = await tx.select().from(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
+      if (old && at > old.updatedAt && at.getTime() - old.updatedAt.getTime() <= 600000) {
+        // Gaps over ten minutes are downtime, never inferred participation.
+        for (const slice of voiceSlices(old.updatedAt, at)) {
+          await tx.insert(guildHour).values({ guildId, bucketStart: slice.bucketStart, voiceSeconds: slice.seconds })
+            .onConflictDoUpdate({ target: [guildHour.guildId, guildHour.bucketStart], set: { voiceSeconds: sql`${guildHour.voiceSeconds} + ${slice.seconds}` } });
+          await tx.insert(channelHour).values({ guildId, channelId: old.channelId, bucketStart: slice.bucketStart, voiceSeconds: slice.seconds })
+            .onConflictDoUpdate({ target: [channelHour.guildId, channelHour.channelId, channelHour.bucketStart], set: { voiceSeconds: sql`${channelHour.voiceSeconds} + ${slice.seconds}` } });
+        }
+      }
+      if (old && at <= old.updatedAt) return false;
+      if (channelId === null) {
+        if (old) await tx.delete(voice).where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
+      } else if (old) {
+        await tx.update(voice).set({ channelId, joinedAt: old.channelId === channelId && at.getTime() - old.updatedAt.getTime() <= 600000 ? old.joinedAt : at, updatedAt: at })
+          .where(and(eq(voice.guildId, guildId), eq(voice.userId, userId)));
+      } else await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: at, updatedAt: at });
+      return true;
+    });
+  }
+  /** A fresh complete snapshot resets the baseline; offline time is never charged. */
+  async reconcileVoice(guildId: string, live: readonly { userId: string; channelId: string }[], at: Date) {
+    if (live.length > 1000) throw new Error('Voice reconciliation exceeds 1000 members');
+    const unique = new Map(live.map(item => [item.userId, item.channelId]));
+    await this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
+      // Remove absent sessions only; never charge the time since the prior process stopped.
+      await tx.execute(sql`DELETE FROM analytics_active_voice_sessions WHERE guild_id = ${guildId} AND updated_at <= ${at} AND NOT (user_id = ANY(${[...unique.keys()]}::text[]))`);
+      for (const [userId, channelId] of unique) {
+        await tx.insert(voice).values({ guildId, userId, channelId, joinedAt: at, updatedAt: at })
+          .onConflictDoUpdate({ target: [voice.guildId, voice.userId], set: { channelId, joinedAt: at, updatedAt: at },
+            setWhere: sql`${voice.updatedAt} <= ${at}` });
+      }
+    });
+    return unique.size;
+  }
+  /** Only observed live sessions accrue time; missing sessions are closed without charging. */
+  async heartbeat(guildId: string, live: readonly { userId: string; channelId: string }[], at: Date, limit = 1000) {
+    const cap = Math.min(1000, Math.max(1, limit));
+    if (live.length > cap) throw new Error('Voice heartbeat exceeds limit; incomplete snapshots cannot be reconciled');
+    const unique = new Map(live.map(item => [item.userId, item.channelId]));
+    let count = 0;
+    for (const [userId, channelId] of unique) {
+      await this.voice(guildId, userId, channelId, at);
+      count++;
+    }
+    await this.db.execute(sql`DELETE FROM analytics_active_voice_sessions WHERE guild_id = ${guildId} AND updated_at < ${at} AND NOT (user_id = ANY(${[...unique.keys()]}::text[]))`);
+    return count;
+  }
+  async prune(now = new Date(), limit = 500) {
+    const cap = Math.min(1000, Math.max(1, limit));
+    const dedupeCutoff = new Date(now.getTime() - 72 * 3600000);
+    const removed = await this.db.execute(sql`WITH doomed AS (SELECT guild_id, event_key FROM analytics_event_dedupe WHERE created_at < ${dedupeCutoff} LIMIT ${cap}) DELETE FROM analytics_event_dedupe d USING doomed WHERE d.guild_id = doomed.guild_id AND d.event_key = doomed.event_key`);
+    let total = removed.rowCount ?? 0;
+    for (const table of [guildHour, channelHour, commandHour] as const) {
+      const name = table === guildHour ? sql`analytics_guild_hourly` : table === channelHour ? sql`analytics_channel_hourly` : sql`analytics_command_hourly`;
+      const result = await this.db.execute(sql`WITH doomed AS (SELECT ctid FROM ${name} AS a WHERE a.bucket_start < ${now} - (COALESCE((SELECT s.retention_days FROM analytics_settings s WHERE s.guild_id = a.guild_id), 180) * interval '1 day') LIMIT ${cap}) DELETE FROM ${name} AS a USING doomed WHERE a.ctid = doomed.ctid`);
+      total += result.rowCount ?? 0;
+    }
+    const stale = await this.db.execute(sql`WITH doomed AS (SELECT a.ctid FROM analytics_member_state a WHERE a.last_changed_at < ${now} - (COALESCE((SELECT s.retention_days FROM analytics_settings s WHERE s.guild_id = a.guild_id), 180) * interval '1 day') LIMIT ${cap}) DELETE FROM analytics_member_state a USING doomed WHERE a.ctid = doomed.ctid`);
+    const abandonedVoice = await this.db.execute(sql`WITH doomed AS (SELECT ctid FROM analytics_active_voice_sessions WHERE updated_at < ${now} - interval '72 hours' LIMIT ${cap}) DELETE FROM analytics_active_voice_sessions a USING doomed WHERE a.ctid = doomed.ctid`);
+    return total + (stale.rowCount ?? 0) + (abandonedVoice.rowCount ?? 0);
+  }
+  async summary(guildId: string, range: AnalyticsRange, now = new Date(), timezone = 'UTC') {
+    const since = new Date(now.getTime() - rangeHours[range] * 3600000);
+    const bounds = (column: typeof guildHour.bucketStart) => and(eq(guildHour.guildId, guildId), gte(column, since), lt(column, now));
+    const trend = await this.db.select().from(guildHour).where(bounds(guildHour.bucketStart)).orderBy(guildHour.bucketStart).limit(2160);
+    const channels = await this.db.select({ channelId: channelHour.channelId, messages: sql<number>`sum(${channelHour.messages})::float8`, voiceSeconds: sql<number>`sum(${channelHour.voiceSeconds})::float8` })
+      .from(channelHour).where(and(eq(channelHour.guildId, guildId), gte(channelHour.bucketStart, since), lt(channelHour.bucketStart, now)))
+      .groupBy(channelHour.channelId).orderBy(sql`sum(${channelHour.messages}) DESC`).limit(10);
+    const voiceChannels = await this.db.select({ channelId: channelHour.channelId,
+      voiceSeconds: sql<number>`sum(${channelHour.voiceSeconds})::float8` }).from(channelHour)
+      .where(and(eq(channelHour.guildId, guildId), gte(channelHour.bucketStart, since), lt(channelHour.bucketStart, now)))
+      .groupBy(channelHour.channelId).orderBy(sql`sum(${channelHour.voiceSeconds}) DESC`).limit(10);
+    const commands = await this.db.select({ commandName: commandHour.commandName, invocations: sql<number>`sum(${commandHour.invocations})::float8`, errors: sql<number>`sum(${commandHour.errors})::float8`, totalDurationMs: sql<number>`sum(${commandHour.totalDurationMs})::float8` })
+      .from(commandHour).where(and(eq(commandHour.guildId, guildId), gte(commandHour.bucketStart, since), lt(commandHour.bucketStart, now)))
+      .groupBy(commandHour.commandName).orderBy(sql`sum(${commandHour.invocations}) DESC`).limit(10);
+    // Business events are authoritative, not duplicated. Linked child tables are scoped through their parent guild.
+    const business = await this.db.execute(sql`SELECT
+      (SELECT count(*)::int FROM moderation_cases WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now}) AS moderation_cases,
+      (SELECT count(*)::int FROM tickets WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now}) AS tickets,
+      (SELECT count(*)::int FROM suggestions WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now}) AS suggestions,
+      (SELECT count(*)::int FROM community_events WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now}) AS events,
+      (SELECT count(*)::int FROM event_attendance a JOIN community_events e ON e.id = a.event_id WHERE e.guild_id = ${guildId} AND a.marked_at >= ${since} AND a.marked_at < ${now}) AS attendance,
+      (SELECT count(*)::int FROM giveaways WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now}) AS giveaways,
+      (SELECT count(*)::int FROM giveaway_entries a JOIN giveaways g ON g.id = a.giveaway_id WHERE g.guild_id = ${guildId} AND a.entered_at >= ${since} AND a.entered_at < ${now}) AS giveaway_entries,
+      (SELECT count(*)::int FROM giveaway_winners a JOIN giveaways g ON g.id = a.giveaway_id JOIN giveaway_draws d ON d.id = a.draw_id WHERE g.guild_id = ${guildId} AND d.created_at >= ${since} AND d.created_at < ${now}) AS giveaway_winners,
+      (SELECT count(*)::int FROM member_levels WHERE guild_id = ${guildId}) AS level_members,
+      (SELECT count(*)::int FROM member_reputation WHERE guild_id = ${guildId}) AS reputation_members,
+      (SELECT count(*)::int FROM member_achievements WHERE guild_id = ${guildId} AND awarded_at >= ${since} AND awarded_at < ${now}) AS achievements`);
+    // Fixed-domain projections are aggregate-only: no member identifiers, reasons, transcripts or content leave SQL.
+    const projections = await this.db.execute(sql`SELECT
+      (SELECT coalesce(jsonb_object_agg(action, n), '{}'::jsonb) FROM (SELECT action, count(*)::int n FROM moderation_cases WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now} GROUP BY action LIMIT 10) x) AS moderation_actions,
+      (SELECT coalesce(jsonb_agg(jsonb_build_object('day', day, 'count', n) ORDER BY day), '[]'::jsonb) FROM (SELECT (created_at AT TIME ZONE ${timezone})::date AS day, count(*)::int n FROM moderation_cases WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now} GROUP BY 1 ORDER BY 1 LIMIT 92) x) AS moderation_days,
+      (SELECT count(*)::int FROM tickets WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now}) AS tickets_opened,
+      (SELECT count(*)::int FROM tickets WHERE guild_id = ${guildId} AND closed_at >= ${since} AND closed_at < ${now}) AS tickets_closed,
+      (SELECT count(*)::int FROM tickets WHERE guild_id = ${guildId} AND status IN ('OPEN','CLAIMED')) AS tickets_open,
+       (SELECT coalesce(jsonb_agg(jsonb_build_object('day', day, 'opened', opened, 'closed', closed) ORDER BY day), '[]'::jsonb)
+         FROM (SELECT day, sum(opened)::int AS opened, sum(closed)::int AS closed FROM (
+           SELECT (created_at AT TIME ZONE ${timezone})::date AS day, 1 AS opened, 0 AS closed
+             FROM tickets WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now}
+           UNION ALL
+           SELECT (closed_at AT TIME ZONE ${timezone})::date AS day, 0 AS opened, 1 AS closed
+             FROM tickets WHERE guild_id = ${guildId} AND closed_at >= ${since} AND closed_at < ${now}
+         ) events GROUP BY day ORDER BY day LIMIT 92) daily) AS ticket_days,
+      (SELECT avg(extract(epoch FROM (closed_at - created_at)))::float8 FROM tickets WHERE guild_id = ${guildId} AND closed_at >= ${since} AND closed_at < ${now} AND closed_at >= created_at) AS ticket_resolution_seconds,
+      (SELECT coalesce(jsonb_object_agg(status, n), '{}'::jsonb) FROM (SELECT status, count(*)::int n FROM suggestions WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now} GROUP BY status LIMIT 10) x) AS suggestion_statuses,
+      (SELECT count(*)::int FROM suggestion_votes v JOIN suggestions s ON s.id = v.suggestion_id WHERE s.guild_id = ${guildId} AND v.created_at >= ${since} AND v.created_at < ${now}) AS suggestion_votes,
+      (SELECT coalesce(jsonb_object_agg(status, n), '{}'::jsonb) FROM (SELECT status, count(*)::int n FROM community_events WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now} GROUP BY status LIMIT 10) x) AS event_statuses,
+      (SELECT count(*)::int FROM event_participants p JOIN community_events e ON e.id = p.event_id WHERE e.guild_id = ${guildId} AND p.joined_at >= ${since} AND p.joined_at < ${now}) AS event_rsvps,
+      (SELECT coalesce(jsonb_object_agg(status, n), '{}'::jsonb) FROM (SELECT status, count(*)::int n FROM giveaways WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now} GROUP BY status LIMIT 10) x) AS giveaway_statuses,
+      (SELECT coalesce(jsonb_object_agg(achievement_id, n), '{}'::jsonb) FROM (SELECT achievement_id, count(*)::int n FROM member_achievements WHERE guild_id = ${guildId} AND awarded_at >= ${since} AND awarded_at < ${now} GROUP BY achievement_id ORDER BY n DESC LIMIT 10) x) AS achievement_distribution,
+      (SELECT count(*)::int FROM tempvoice_rooms WHERE guild_id = ${guildId} AND created_at >= ${since} AND created_at < ${now}) AS tempvoice_rooms_created,
+      (SELECT count(*)::int FROM tempvoice_rooms WHERE guild_id = ${guildId} AND status IN ('CREATING','ACTIVE','DELETING')) AS tempvoice_rooms_active`);
+    const hourlyDays = await this.db.execute(sql`SELECT (bucket_start AT TIME ZONE ${timezone})::date AS day,
+      sum(messages)::float8 AS messages, sum(joins)::float8 AS joins, sum(leaves)::float8 AS leaves,
+      sum(joins - leaves)::float8 AS net, sum(voice_seconds)::float8 AS voice_seconds
+      FROM analytics_guild_hourly WHERE guild_id = ${guildId} AND bucket_start >= ${since} AND bucket_start < ${now}
+      GROUP BY 1 ORDER BY 1 LIMIT 92`);
+    const detail = projections.rows[0] ?? {};
+    return { guildId, range, since, until: now, details: {
+      moderation: { actions: detail.moderation_actions ?? {}, daily: detail.moderation_days ?? [] },
+      tickets: { opened: detail.tickets_opened ?? 0, closed: detail.tickets_closed ?? 0, open: detail.tickets_open ?? 0,
+         daily: detail.ticket_days ?? [], averageResolutionSeconds: detail.ticket_resolution_seconds ?? null },
+      suggestions: { submitted: business.rows[0]?.suggestions ?? 0, statuses: detail.suggestion_statuses ?? {}, votes: detail.suggestion_votes ?? 0 },
+      events: { created: business.rows[0]?.events ?? 0, statuses: detail.event_statuses ?? {}, rsvps: detail.event_rsvps ?? 0, attendance: business.rows[0]?.attendance ?? 0 },
+      giveaways: { created: business.rows[0]?.giveaways ?? 0, statuses: detail.giveaway_statuses ?? {}, entries: business.rows[0]?.giveaway_entries ?? 0, winners: business.rows[0]?.giveaway_winners ?? 0 },
+      achievements: { distribution: detail.achievement_distribution ?? {} },
+      tempvoice: { created: detail.tempvoice_rooms_created ?? 0, active: detail.tempvoice_rooms_active ?? 0 },
+    }, localDays: hourlyDays.rows, totals: trend.reduce((sum, row) => ({ messages: sum.messages + row.messages, joins: sum.joins + row.joins,
+      leaves: sum.leaves + row.leaves, net: sum.net + row.joins - row.leaves,
+      voiceSeconds: sum.voiceSeconds + row.voiceSeconds }), { messages: 0, joins: 0, leaves: 0, net: 0, voiceSeconds: 0 }),
+      trend, channels, voiceChannels, commands, business: business.rows[0] ?? {} };
+  }
+}

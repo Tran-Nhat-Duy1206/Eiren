@@ -64,6 +64,20 @@
       "when": 1790462819186,
       "tag": "0008_blue_dreadnoughts",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790465238110,
+      "tag": "0009_lumpy_freak",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790497453057,
+      "tag": "0010_silky_taskmaster",
+      "breakpoints": true
     }
   ]
 }

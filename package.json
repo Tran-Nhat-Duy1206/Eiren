@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "packageManager": "pnpm@10.28.2",
   "scripts": {
     "dev": "tsx watch src/app/main.ts",
@@ -17,11 +19,18 @@
     "db:check": "drizzle-kit check",
     "db:smoke": "tsx src/app/db-smoke.ts",
     "db:v4": "tsx src/app/v4-db-check.ts",
-    "db:v5": "tsx src/app/v5-db-check.ts"
+    "db:v5": "tsx src/app/v5-db-check.ts",
+    "db:v6": "tsx src/app/v6-db-check.ts",
+    "dashboard:check": "tsx src/app/dashboard-local-check.ts"
   },
   "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/formbody": "^8.0.2",
+    "@fastify/helmet": "^13.1.1",
+    "@fastify/rate-limit": "^10.3.0",
     "discord.js": "^14.25.1",
     "drizzle-orm": "^0.45.1",
+    "fastify": "^5.12.5",
     "pg": "^8.16.3",
     "pino": "^10.3.1",
     "zod": "^4.3.5"

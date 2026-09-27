@@ -38,6 +38,17 @@ export class AchievementsService {
   onEventAttend(guildId: string, userId: string) { return this.award(guildId, userId, 'events', ['event-attendance-1']); }
   onGiveawayWin(guildId: string, userId: string) { return this.award(guildId, userId, 'giveaways', ['giveaway-win-1']); }
 
+  /** Read-only view for web GETs: unlike evaluation, it never awards achievements. */
+  async listMember(guildId: string, userId: string) {
+    if (!await this.modules.isEnabled(guildId, 'achievements')) return [];
+    const rows = await this.repo.list(guildId, userId);
+    const awarded = new Map(rows.map(row => [row.achievementId, row.awardedAt]));
+    const enabled = new Map(await Promise.all((['levels', 'reputation', 'events', 'giveaways'] as const)
+      .map(async source => [source, await this.modules.isEnabled(guildId, source)] as const)));
+    return ACHIEVEMENTS.filter(item => awarded.has(item.id) && enabled.get(item.category))
+      .map(item => ({ ...item, awardedAt: awarded.get(item.id)! }));
+  }
+
   /** Only checks the requested member, and never reads a disabled module's source table. */
   async evaluateMember(guildId: string, userId: string) {
     if (!await this.modules.isEnabled(guildId, 'achievements')) return [];
@@ -53,11 +64,6 @@ export class AchievementsService {
     }
     if (this.sources.giveawayWin && await this.modules.isEnabled(guildId, 'giveaways') && await this.sources.giveawayWin(guildId, userId))
       await this.onGiveawayWin(guildId, userId);
-    const rows = await this.repo.list(guildId, userId);
-    const awarded = new Map(rows.map(row => [row.achievementId, row.awardedAt]));
-    const enabled = new Map(await Promise.all((['levels', 'reputation', 'events', 'giveaways'] as const)
-      .map(async source => [source, await this.modules.isEnabled(guildId, source)] as const)));
-    return ACHIEVEMENTS.filter(item => awarded.has(item.id) && enabled.get(item.category))
-      .map(item => ({ ...item, awardedAt: awarded.get(item.id)! }));
+    return this.listMember(guildId, userId);
   }
 }
