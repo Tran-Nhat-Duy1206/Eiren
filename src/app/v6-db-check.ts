@@ -6,7 +6,7 @@ import { guilds, analyticsGuildHourly as hourly, analyticsChannelHourly as chann
   analyticsCommandHourly as commands, analyticsEventDedupe as dedupe,
   analyticsMemberState as members, analyticsActiveVoiceSessions as voice,
   dashboardSessions, dashboardAuditLog, guildModules } from '../core/database/schema.js';
-import { AnalyticsRepository } from '../modules/analytics/repository.js';
+import { AnalyticsRepository, type AnalyticsIngressReservation } from '../modules/analytics/repository.js';
 import { AnalyticsService } from '../modules/analytics/service.js';
 import { ModuleService } from '../services/module-service.js';
 import { GuildRepository } from '../repositories/guild-repository.js';
@@ -265,48 +265,39 @@ try {
     (await db.select().from(voice).where(and(eq(voice.guildId, guildId),
       eq(voice.userId, 'sequence-vs-time'))))[0]?.channelId === 'B-sequence');
   stage = 'nonvoice-opt-out-race';
-  const staleServiceCall = async (run: (service: AnalyticsService) => Promise<boolean>, reenable = false) => {
-    let observed!: () => void;
+  const staleServiceCall = async (run: (token: AnalyticsIngressReservation) => Promise<boolean>, reenable = false) => {
+    // The real PostgreSQL ingress transaction commits before a delayed final writer is released.
+    const token = await realGated.reserveIngestion(guildId);
+    if (!token) throw new Error('Expected enabled synthetic analytics ingress');
     let release!: () => void;
-    const checked = new Promise<void>(resolve => { observed = resolve; });
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const service = new AnalyticsService(analytics, {} as PermissionService, {
-      voiceEpoch: (guild: string) => realModules.voiceEpoch(guild),
-      isEnabled: async (guild: string, key: string) => {
-        const enabled = await realModules.isEnabled(guild, key);
-        observed();
-        await gate;
-        return enabled;
-      },
-    } as unknown as ModuleService);
-    const pending = run(service);
-    await checked;
+    const pending = (async () => { await gate; return run(token); })();
     await realModules.setEnabled(guildId, 'analytics', false, 'synthetic');
     if (reenable) await realModules.setEnabled(guildId, 'analytics', true, 'synthetic');
     release();
     return pending;
   };
   const messageOffKey = `optout-message-${id}`;
-  const messageOff = await staleServiceCall(s => s.recordMessage(guildId, messageOffKey, 'optout-channel', time(6310_000)));
-  assert('disabledAfterMessageCheckRejectsAllTelemetry', !messageOff &&
+  const messageOff = await staleServiceCall(token => realGated.recordMessage(token, messageOffKey, 'optout-channel', time(6310_000)));
+  assert('disabledAfterMessageIngressRejectsAllTelemetry', !messageOff &&
     !(await db.select().from(dedupe).where(and(eq(dedupe.guildId, guildId), eq(dedupe.eventKey, `m:${messageOffKey}`)))).length &&
     !(await db.select().from(channels).where(and(eq(channels.guildId, guildId), eq(channels.channelId, 'optout-channel')))).length &&
     (await db.select().from(hourly).where(eq(hourly.guildId, guildId))).reduce((sum, row) => sum + row.messages, 0) === 9);
   await realModules.setEnabled(guildId, 'analytics', true, 'synthetic');
-  const memberOff = await staleServiceCall(s => s.recordMember(guildId, 'optout-member', true, time(6320_000)));
-  assert('disabledAfterMemberCheckRejectsStateAndCounters', !memberOff &&
+  const memberOff = await staleServiceCall(token => realGated.recordMember(token, 'optout-member', true, time(6320_000)));
+  assert('disabledAfterMemberIngressRejectsStateAndCounters', !memberOff &&
     !(await db.select().from(members).where(and(eq(members.guildId, guildId), eq(members.userId, 'optout-member')))).length &&
     (await db.select().from(hourly).where(eq(hourly.guildId, guildId))).reduce((sum, row) => sum + row.joins, 0) === 2);
   await realModules.setEnabled(guildId, 'analytics', true, 'synthetic');
   const commandOffKey = `optout-command-${id}`;
-  const commandOff = await staleServiceCall(s => s.recordCommand(guildId, commandOffKey, 'optout', true, 23, time(6330_000)));
-  assert('disabledAfterCommandCheckRejectsDedupeAndCounts', !commandOff &&
+  const commandOff = await staleServiceCall(token => realGated.recordCommand(token, commandOffKey, 'optout', true, 23, time(6330_000)));
+  assert('disabledAfterCommandIngressRejectsDedupeAndCounts', !commandOff &&
     !(await db.select().from(dedupe).where(and(eq(dedupe.guildId, guildId), eq(dedupe.eventKey, `c:${commandOffKey}`)))).length &&
     !(await db.select().from(commands).where(and(eq(commands.guildId, guildId), eq(commands.commandName, 'optout')))).length);
   await realModules.setEnabled(guildId, 'analytics', true, 'synthetic');
   const priorEpoch = await realModules.voiceEpoch(guildId);
   const reenablingMessageKey = `old-epoch-message-${id}`;
-  const staleMessage = await staleServiceCall(s => s.recordMessage(guildId, reenablingMessageKey,
+  const staleMessage = await staleServiceCall(token => realGated.recordMessage(token, reenablingMessageKey,
     'old-epoch-channel', time(6340_000)), true);
   assert('oldEpochMessageRejectedAfterReenable', !staleMessage &&
     (await realModules.voiceEpoch(guildId)) === priorEpoch + 2 &&
@@ -315,18 +306,23 @@ try {
     !(await db.select().from(channels).where(and(eq(channels.guildId, guildId),
       eq(channels.channelId, 'old-epoch-channel')))).length &&
     (await db.select().from(hourly).where(eq(hourly.guildId, guildId))).reduce((sum, row) => sum + row.messages, 0) === 9);
-  const staleMember = await staleServiceCall(s => s.recordMember(guildId, 'old-epoch-member', true, time(6350_000)), true);
+  const staleMember = await staleServiceCall(token => realGated.recordMember(token, 'old-epoch-member', true, time(6350_000)), true);
   assert('oldEpochMemberRejectedAfterReenable', !staleMember &&
     !(await db.select().from(members).where(and(eq(members.guildId, guildId), eq(members.userId, 'old-epoch-member')))).length &&
     (await db.select().from(hourly).where(eq(hourly.guildId, guildId))).reduce((sum, row) => sum + row.joins, 0) === 2);
   const reenablingCommandKey = `old-epoch-command-${id}`;
-  const staleCommand = await staleServiceCall(s => s.recordCommand(guildId, reenablingCommandKey,
+  const staleCommand = await staleServiceCall(token => realGated.recordCommand(token, reenablingCommandKey,
     'optoutold', true, 29, time(6360_000)), true);
   assert('oldEpochCommandRejectedAfterReenable', !staleCommand &&
     !(await db.select().from(dedupe).where(and(eq(dedupe.guildId, guildId),
       eq(dedupe.eventKey, `c:${reenablingCommandKey}`)))).length &&
     !(await db.select().from(commands).where(and(eq(commands.guildId, guildId),
       eq(commands.commandName, 'optoutold')))).length);
+  await realModules.setEnabled(guildId, 'analytics', false, 'synthetic');
+  assert('disabledBeforeIngressCannotReserve', await realGated.reserveIngestion(guildId) === null);
+  await realModules.setEnabled(guildId, 'analytics', true, 'synthetic');
+  const freshIngress = await realGated.reserveIngestion(guildId);
+  assert('reenabledBeforeIngressUsesCurrentEpoch', freshIngress?.epoch === await realModules.voiceEpoch(guildId));
   stage = 'commands';
   assert('commandAccepted', await analytics.command(guildId, `cmd-${id}`, 'check', false, 11, time(1000)));
   assert('commandDedupeAndAggregate', !await analytics.command(guildId, `cmd-${id}`, 'check', true, 99, time(1000)) &&

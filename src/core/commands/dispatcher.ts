@@ -2,12 +2,22 @@ import { MessageFlags, type ChatInputCommandInteraction, type Client } from 'dis
 import { AppError, handleError } from '../errors/errors.js';
 import type { Command } from './command.js';
 import type { Services } from '../../app/services.js';
+import type { AnalyticsIngressReservation } from '../../modules/analytics/repository.js';
 
 export async function dispatchCommand(interaction: ChatInputCommandInteraction, commands: ReadonlyMap<string, Command>, services: Services) {
   const command = commands.get(interaction.commandName);
   if (!command) return;
   const startedAt = new Date();
   const started = performance.now();
+  // Optional telemetry is reserved before the first dispatcher await. Its epoch is never refreshed.
+  let analyticsIngress: AnalyticsIngressReservation | null = null;
+  if (interaction.guildId) {
+    try { analyticsIngress = await services.analytics.reserveIngestion(interaction.guildId); }
+    catch (error) {
+      services.logger.warn({ command: interaction.commandName, errorType: error instanceof Error ? error.name : 'unknown' },
+        'Optional command analytics ingress failed');
+    }
+  }
   let failed = false;
   try {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -36,11 +46,10 @@ export async function dispatchCommand(interaction: ChatInputCommandInteraction, 
     }
   } finally {
     // Analytics is optional telemetry: a failed write never changes a command's outcome.
-    if (interaction.guildId) {
+    if (analyticsIngress) {
       try {
-        if (await services.modules.isEnabled(interaction.guildId, 'analytics'))
-          await services.analytics.recordCommand(interaction.guildId, interaction.id, interaction.commandName,
-            failed, Math.max(0, Math.min(86_400_000, Math.round(performance.now() - started))), startedAt);
+        await services.analytics.recordCommand(analyticsIngress, interaction.id, interaction.commandName,
+          failed, Math.max(0, Math.min(86_400_000, Math.round(performance.now() - started))), startedAt);
       } catch (error) {
         services.logger.warn({ command: interaction.commandName, errorType: error instanceof Error ? error.name : 'unknown' },
           'Optional command analytics failed');

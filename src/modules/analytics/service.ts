@@ -1,7 +1,7 @@
 import { AppError } from '../../core/errors/errors.js';
 import type { Actor, PermissionService } from '../../core/permissions/permission-service.js';
 import type { ModuleService } from '../../services/module-service.js';
-import { AnalyticsRepository, rangeHours, type AnalyticsRange, type VoiceReservation } from './repository.js';
+import { AnalyticsRepository, rangeHours, type AnalyticsRange, type AnalyticsIngressReservation, type VoiceReservation } from './repository.js';
 
 export class AnalyticsService {
   private readonly voiceReady = new Map<string, { at: Date; epoch: number }>();
@@ -38,19 +38,21 @@ export class AnalyticsService {
     if (!(at instanceof Date) || !Number.isFinite(at.getTime()) || at.getTime() > Date.now() + 300000)
       throw new AppError('VALIDATION', 'Invalid analytics timestamp.');
   }
-  async recordMessage(guildId: string, messageId: string, channelId: string, at: Date, botFlag = false, systemFlag = false, webhookFlag = false) {
+  /** No module lookup precedes this short DB ingress transaction. Null means no telemetry. */
+  reserveIngestion(guildId: string): Promise<AnalyticsIngressReservation | null> {
+    return this.repository.reserveIngestion(guildId);
+  }
+  async recordMessage(reservation: AnalyticsIngressReservation | null, messageId: string, channelId: string, at: Date,
+    botFlag = false, systemFlag = false, webhookFlag = false) {
     if (botFlag || systemFlag || webhookFlag) return false;
     this.validate(at);
-    // Capture the pre-check epoch: a disable/re-enable cannot relabel delayed old work as new.
-    const epoch = await this.modules.voiceEpoch?.(guildId);
-    if (!await this.modules.isEnabled(guildId, 'analytics')) return false;
-    return this.repository.message(guildId, messageId, channelId, at, epoch);
+    if (!reservation) return false;
+    return this.repository.message(reservation.guildId, messageId, channelId, at, reservation.epoch);
   }
-  async recordMember(guildId: string, userId: string, present: boolean, at: Date) {
+  async recordMember(reservation: AnalyticsIngressReservation | null, userId: string, present: boolean, at: Date) {
     this.validate(at);
-    const epoch = await this.modules.voiceEpoch?.(guildId);
-    if (!await this.modules.isEnabled(guildId, 'analytics')) return false;
-    return this.repository.member(guildId, userId, present, at, epoch);
+    if (!reservation) return false;
+    return this.repository.member(reservation.guildId, userId, present, at, reservation.epoch);
   }
   async recordVoice(guildId: string, userId: string, channelId: string | null, at: Date) {
     this.validate(at);
@@ -66,13 +68,13 @@ export class AnalyticsService {
     if (!await this.modules.isEnabled(guildId, 'analytics')) return false;
     return this.repository.baselineVoice(guildId, userId, null, at);
   }
-  async recordCommand(guildId: string, interactionId: string, commandName: string, failed: boolean, durationMs: number, at: Date) {
+  async recordCommand(reservation: AnalyticsIngressReservation | null, interactionId: string, commandName: string,
+    failed: boolean, durationMs: number, at: Date) {
     this.validate(at);
     if (!Number.isSafeInteger(durationMs) || durationMs < 0 || durationMs > 86400000 || !/^[a-z0-9_-]{1,32}$/.test(commandName))
       throw new AppError('VALIDATION', 'Invalid command telemetry.');
-    const epoch = await this.modules.voiceEpoch?.(guildId);
-    if (!await this.modules.isEnabled(guildId, 'analytics')) return false;
-    return this.repository.command(guildId, interactionId, commandName, failed, durationMs, at, epoch);
+    if (!reservation) return false;
+    return this.repository.command(reservation.guildId, interactionId, commandName, failed, durationMs, at, reservation.epoch);
   }
   async summary(guildId: string, range: AnalyticsRange, timezone = 'UTC', now = new Date()) {
     if (!Object.hasOwn(rangeHours, range)) throw new AppError('VALIDATION', 'Choose 24h, 7d, 30d, or 90d.');

@@ -4,7 +4,7 @@ import type { Services } from '../../app/services.js';
 export interface BotEvent {
   name: keyof ClientEvents;
   moduleKey: string;
-  /** Handler reserves and checks its module in PostgreSQL before any awaited dispatcher lookup. */
+  /** Handler's first async gate must reserve/check this module in PostgreSQL; no dispatcher precheck. */
   databaseGatedAtIngress?: boolean;
   // Events without a guild are handled only by permanently enabled core events.
   guildId(...args: unknown[]): string | null;

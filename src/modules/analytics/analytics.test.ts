@@ -17,37 +17,45 @@ describe('analytics UTC allocation and privacy boundaries', () => {
   it('rejects excluded messages and invalid command duration before persistence', async () => {
     const repository = { message: vi.fn(), command: vi.fn() } as unknown as AnalyticsRepository;
     const service = new AnalyticsService(repository, {} as PermissionService, {} as ModuleService);
-    expect(await service.recordMessage('g', 'm', 'c', at, true)).toBe(false);
-    expect(await service.recordMessage('g', 'm', 'c', at, false, true)).toBe(false);
-    expect(await service.recordMessage('g', 'm', 'c', at, false, false, true)).toBe(false);
+    const token = { guildId: 'g', epoch: 7 };
+    expect(await service.recordMessage(token, 'm', 'c', at, true)).toBe(false);
+    expect(await service.recordMessage(token, 'm', 'c', at, false, true)).toBe(false);
+    expect(await service.recordMessage(token, 'm', 'c', at, false, false, true)).toBe(false);
     expect(repository.message).not.toHaveBeenCalled();
-    await expect(service.recordCommand('g', 'i', 'ping', false, -1, at)).rejects.toMatchObject({ code: 'VALIDATION' });
+    await expect(service.recordCommand(token, 'i', 'ping', false, -1, at)).rejects.toMatchObject({ code: 'VALIDATION' });
     expect(repository.command).not.toHaveBeenCalled();
   });
-  it('passes the pre-check analytics epoch to all non-voice repository writers', async () => {
+  it('passes the immutable ingress epoch to all non-voice writers without refreshing it', async () => {
     const message = vi.fn(async () => true);
     const member = vi.fn(async () => true);
     const command = vi.fn(async () => true);
-    const modules = { voiceEpoch: vi.fn(async () => 7), isEnabled: vi.fn(async () => true) } as unknown as ModuleService;
-    const service = new AnalyticsService({ message, member, command } as unknown as AnalyticsRepository,
+    const reserveIngestion = vi.fn(async (guildId: string) => Object.freeze({ guildId, epoch: 7 }));
+    const modules = { voiceEpoch: vi.fn(), isEnabled: vi.fn() } as unknown as ModuleService;
+    const service = new AnalyticsService({ message, member, command, reserveIngestion } as unknown as AnalyticsRepository,
       {} as PermissionService, modules);
     const at = new Date();
-    expect(await service.recordMessage('guild', 'message', 'channel', at)).toBe(true);
-    expect(await service.recordMember('guild', 'human', true, at)).toBe(true);
-    expect(await service.recordCommand('guild', 'interaction', 'ping', false, 23, at)).toBe(true);
+    const token = await service.reserveIngestion('guild');
+    expect(await service.recordMessage(token, 'message', 'channel', at)).toBe(true);
+    expect(await service.recordMember(token, 'human', true, at)).toBe(true);
+    expect(await service.recordCommand(token, 'interaction', 'ping', false, 23, at)).toBe(true);
     expect(message).toHaveBeenCalledWith('guild', 'message', 'channel', at, 7);
     expect(member).toHaveBeenCalledWith('guild', 'human', true, at, 7);
     expect(command).toHaveBeenCalledWith('guild', 'interaction', 'ping', false, 23, at, 7);
+    expect(modules.voiceEpoch).not.toHaveBeenCalled();
+    expect(modules.isEnabled).not.toHaveBeenCalled();
   });
   it('does not collect any gateway or command events when module is disabled', async () => {
-    const repository = { message: vi.fn(), member: vi.fn(), voice: vi.fn(), command: vi.fn() } as unknown as AnalyticsRepository;
+    const repository = { message: vi.fn(), member: vi.fn(), voice: vi.fn(), command: vi.fn(),
+      reserveIngestion: vi.fn(async () => null) } as unknown as AnalyticsRepository;
     const modules = { isEnabled: vi.fn(async () => false) } as unknown as ModuleService;
     const service = new AnalyticsService(repository, {} as PermissionService, modules);
     const now = new Date();
-    expect(await service.recordMessage('g', 'm', 'c', now)).toBe(false);
-    expect(await service.recordMember('g', 'u', true, now)).toBe(false);
+    const token = await service.reserveIngestion('g');
+    expect(token).toBeNull();
+    expect(await service.recordMessage(token, 'm', 'c', now)).toBe(false);
+    expect(await service.recordMember(token, 'u', true, now)).toBe(false);
     expect(await service.recordVoice('g', 'u', 'c', now)).toBe(false);
-    expect(await service.recordCommand('g', 'i', 'ping', true, 23, now)).toBe(false);
+    expect(await service.recordCommand(token, 'i', 'ping', true, 23, now)).toBe(false);
     for (const method of ['message', 'member', 'voice', 'command'] as const) expect(repository[method]).not.toHaveBeenCalled();
   });
   it('never credits a persisted pre-restart voice session before a fresh guild baseline', async () => {

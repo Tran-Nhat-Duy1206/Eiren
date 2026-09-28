@@ -10,6 +10,7 @@ export const hourStart = (at: Date) => new Date(Math.floor(at.getTime() / 360000
 export type VoiceSlice = { bucketStart: Date; seconds: number };
 export type VoiceReservation = { guildId: string; userId: string; epoch: number; sequence: number; observedAt: Date };
 export type VoiceBoundary = { epoch: number; sequence: number; cutoff: Date };
+export type AnalyticsIngressReservation = Readonly<{ guildId: string; epoch: number }>;
 /** Whole-second intervals are apportioned by UTC hour; subsecond residuals are deliberately discarded. */
 export function voiceSlices(start: Date, end: Date): VoiceSlice[] {
   const result: VoiceSlice[] = [];
@@ -40,6 +41,14 @@ export class AnalyticsRepository {
   private async stamp(tx: Parameters<Parameters<Database['transaction']>[0]>[0], guildId: string, eventKey: string, at: Date) {
     const inserted = await tx.insert(dedupe).values({ guildId, eventKey, createdAt: at }).onConflictDoNothing().returning({ eventKey: dedupe.eventKey });
     return inserted.length !== 0;
+  }
+  /** First ingress operation: serialize the observation epoch with analytics toggles. */
+  async reserveIngestion(guildId: string): Promise<AnalyticsIngressReservation | null> {
+    return this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
+      const module = await this.voiceModuleState(tx, guildId);
+      return module?.enabled ? Object.freeze({ guildId, epoch: module.version }) : null;
+    });
   }
   /** The analytics toggle shares this guild lock. Reject before writing even a dedupe key. */
   private async ingestionAllowed(tx: Parameters<Parameters<Database['transaction']>[0]>[0], guildId: string,

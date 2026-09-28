@@ -2,23 +2,30 @@ import { Events, type GuildMember, type Message, type VoiceState } from 'discord
 import type { BotEvent } from '../../core/events/event.js';
 
 export const analyticsEvents: BotEvent[] = [
-  { name: Events.MessageCreate, moduleKey: 'analytics', guildId: value => (value as Message | undefined)?.guildId ?? null,
+  { name: Events.MessageCreate, moduleKey: 'analytics', databaseGatedAtIngress: true,
+    guildId: value => (value as Message | undefined)?.guildId ?? null,
     async handle(services, value) {
       const message = value as Message;
       if (!message?.guildId || !message.author || message.author.bot || message.system || message.webhookId) return;
-      await services.analytics.recordMessage(message.guildId, message.id, message.channelId, message.createdAt,
+      const reservation = await services.analytics.reserveIngestion(message.guildId);
+      if (!reservation) return;
+      await services.analytics.recordMessage(reservation, message.id, message.channelId, message.createdAt,
         message.author.bot, message.system, Boolean(message.webhookId));
     } },
   ...([Events.GuildMemberAdd, Events.GuildMemberRemove] as const).map(name => ({
-    name, moduleKey: 'analytics', guildId: (value: unknown) => (value as GuildMember | undefined)?.guild?.id ?? null,
+    name, moduleKey: 'analytics', databaseGatedAtIngress: true,
+    guildId: (value: unknown) => (value as GuildMember | undefined)?.guild?.id ?? null,
     async handle(services: Parameters<BotEvent['handle']>[0], value: unknown) {
       const member = value as GuildMember;
       if (!member?.guild?.id || !member.user || member.user.bot) return;
-      await services.analytics.recordMember(member.guild.id, member.id, name === Events.GuildMemberAdd, new Date());
+      const observedAt = new Date();
+      const reservation = await services.analytics.reserveIngestion(member.guild.id);
+      if (!reservation) return;
+      await services.analytics.recordMember(reservation, member.id, name === Events.GuildMemberAdd, observedAt);
     },
   })),
-  // Bypass only the asynchronous dispatcher precheck: PostgreSQL verifies analytics enabled
-  // while reserving ingress, before any awaited member lookup or classification.
+  // Every analytics gateway collector reserves under the DB module lock before other awaits.
+  // Voice additionally fences each user's pending state before identity classification.
   { name: Events.VoiceStateUpdate, moduleKey: 'analytics', databaseGatedAtIngress: true,
     guildId: value => (value as VoiceState | undefined)?.guild?.id ?? null,
     async handle(services, before, after) {

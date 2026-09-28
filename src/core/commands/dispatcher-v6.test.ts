@@ -12,7 +12,8 @@ function fixture(execute = vi.fn(async () => undefined)) {
     user: { id: '111111111111111111' }, deferReply: vi.fn(async () => undefined), editReply: vi.fn(async () => undefined),
     inGuild: () => true, deferred: true, replied: false,
   };
-  const analytics = { recordCommand: vi.fn(async () => true) };
+  const analytics = { recordCommand: vi.fn(async (_token?: { epoch: number }) => true),
+    reserveIngestion: vi.fn(async (guildId: string): Promise<{ guildId: string; epoch: number } | null> => ({ guildId, epoch: 7 })) };
   const modules = { isEnabled: vi.fn(async (_guild: string, module: string) => module === 'analytics') };
   const permissions = { require: vi.fn(async () => undefined) };
   const logger = { error: vi.fn(), warn: vi.fn() };
@@ -26,7 +27,8 @@ describe('central dispatcher analytics instrumentation', () => {
     const f = fixture();
     await dispatchCommand(f.interaction as never, new Map([['sample', f.command]]), f.services);
     expect(f.execute).toHaveBeenCalledOnce();
-    expect(f.analytics.recordCommand).toHaveBeenCalledWith(f.interaction.guildId, f.interaction.id, 'sample', false,
+    expect(f.analytics.recordCommand).toHaveBeenCalledWith({ guildId: f.interaction.guildId, epoch: 7 },
+      f.interaction.id, 'sample', false,
       expect.any(Number), expect.any(Date));
     expect(JSON.stringify(f.analytics.recordCommand.mock.calls)).not.toContain(f.interaction.user.id);
   });
@@ -34,14 +36,43 @@ describe('central dispatcher analytics instrumentation', () => {
     const f = fixture(vi.fn(async () => { throw new AppError('VALIDATION', 'Invalid command.'); }));
     f.analytics.recordCommand.mockRejectedValueOnce(new Error('analytics database unavailable'));
     await dispatchCommand(f.interaction as never, new Map([['sample', f.command]]), f.services);
-    expect(f.analytics.recordCommand).toHaveBeenCalledWith(f.interaction.guildId, f.interaction.id, 'sample', true,
+    expect(f.analytics.recordCommand).toHaveBeenCalledWith({ guildId: f.interaction.guildId, epoch: 7 },
+      f.interaction.id, 'sample', true,
       expect.any(Number), expect.any(Date));
     expect(f.interaction.editReply).toHaveBeenCalledWith({ content: 'Invalid command.' });
     expect(f.logger.warn).toHaveBeenCalled();
   });
-  it('does not collect while analytics is disabled', async () => {
-    const f = fixture(); f.modules.isEnabled.mockResolvedValue(false);
+  it('captures command telemetry ingress before the first deferred reply await', async () => {
+    const f = fixture();
+    let signal!: () => void;
+    let release!: () => void;
+    const reachedDefer = new Promise<void>(resolve => { signal = resolve; });
+    const deferred = new Promise<void>(resolve => { release = resolve; });
+    let currentEpoch = 7;
+    const accepted: boolean[] = [];
+    f.analytics.recordCommand.mockImplementationOnce(async token => { accepted.push(token?.epoch === currentEpoch); return true; });
+    f.interaction.deferReply.mockImplementationOnce(() => { signal(); return deferred.then(() => undefined); });
+    const dispatch = dispatchCommand(f.interaction as never, new Map([['sample', f.command]]), f.services);
+    await reachedDefer;
+    try { expect(f.analytics.reserveIngestion).toHaveBeenCalledExactlyOnceWith(f.interaction.guildId); }
+    finally { currentEpoch = 9; release(); await dispatch; }
+    expect(accepted).toEqual([false]);
+    expect(f.analytics.recordCommand).toHaveBeenCalledWith({ guildId: f.interaction.guildId, epoch: 7 },
+      f.interaction.id, 'sample', false, expect.any(Number), expect.any(Date));
+  });
+  it('continues the user command when optional analytics reservation fails', async () => {
+    const f = fixture();
+    f.analytics.reserveIngestion.mockRejectedValueOnce(new Error('database unavailable'));
     await dispatchCommand(f.interaction as never, new Map([['sample', f.command]]), f.services);
+    expect(f.execute).toHaveBeenCalledOnce();
+    expect(f.analytics.recordCommand).not.toHaveBeenCalled();
+    expect(f.logger.warn).toHaveBeenCalledWith({ command: 'sample', errorType: 'Error' },
+      'Optional command analytics ingress failed');
+  });
+  it('does not collect while analytics is disabled', async () => {
+    const f = fixture(); f.analytics.reserveIngestion.mockResolvedValueOnce(null);
+    await dispatchCommand(f.interaction as never, new Map([['sample', f.command]]), f.services);
+    expect(f.execute).toHaveBeenCalledOnce();
     expect(f.analytics.recordCommand).not.toHaveBeenCalled();
   });
 });
