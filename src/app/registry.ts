@@ -61,6 +61,8 @@ export const manifests: readonly ModuleManifest[] = [
   { definition: { key: 'tempvoice', defaultEnabled: false }, commands: tempvoiceCommands, events: tempvoiceEvents },
   { definition: { key: 'achievements', defaultEnabled: false }, commands: achievementsCommands, events: [] },
   { definition: { key: 'analytics', defaultEnabled: false }, commands: [], events: analyticsEvents },
+  { definition: { key: 'ai', defaultEnabled: false }, commands: [], events: [] },
+  { definition: { key: 'automation', defaultEnabled: false }, commands: [], events: [] },
 ];
 
 export function buildRegistry(modules: readonly ModuleManifest[]) {

@@ -1,4 +1,4 @@
-import { bigint, boolean, check, index, integer, jsonb, pgTable, primaryKey, bigserial, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, date, foreignKey, index, integer, jsonb, pgTable, primaryKey, bigserial, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const guilds = pgTable('guilds', {
@@ -686,3 +686,166 @@ export const dashboardAuditLog = pgTable('dashboard_audit_log', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [index('dashboard_audit_guild_created_idx').on(table.guildId, table.createdAt),
   check('dashboard_audit_action_check', sql`length(${table.action}) BETWEEN 1 AND 80`)]);
+
+// V7.1 foundations: metadata-only, server-approved AI admission; no prompts, responses or credentials.
+export const aiSettings = pgTable('ai_settings', {
+  guildId: text('guild_id').primaryKey().references(() => guilds.id, { onDelete: 'cascade' }),
+  providerId: text('provider_id').notNull(),
+  modelId: text('model_id').notNull(),
+  guildRequestsPerDay: integer('guild_requests_per_day'),
+  userRequestsPerDay: integer('user_requests_per_day'),
+  monthlyBudgetMicros: bigint('monthly_budget_micros', { mode: 'number' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  check('ai_settings_provider_check', sql`length(${table.providerId}) BETWEEN 1 AND 64 AND ${table.providerId} ~ '^[a-z0-9_-]+$'`),
+  check('ai_settings_model_check', sql`length(${table.modelId}) BETWEEN 1 AND 100 AND ${table.modelId} ~ '^[A-Za-z0-9._:/-]+$'`),
+  check('ai_settings_caps_check', sql`(${table.guildRequestsPerDay} IS NULL OR ${table.guildRequestsPerDay} BETWEEN 1 AND 25) AND
+    (${table.userRequestsPerDay} IS NULL OR ${table.userRequestsPerDay} BETWEEN 1 AND 10) AND
+    (${table.monthlyBudgetMicros} IS NULL OR ${table.monthlyBudgetMicros} BETWEEN 1 AND 5000000)`),
+]);
+
+export const aiUsageDaily = pgTable('ai_usage_daily', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  utcDay: date('utc_day', { mode: 'string' }).notNull(),
+  requests: integer('requests').notNull().default(0),
+  rejected: integer('rejected').notNull().default(0),
+  reservedCostMicros: bigint('reserved_cost_micros', { mode: 'number' }).notNull().default(0),
+  settledCostMicros: bigint('settled_cost_micros', { mode: 'number' }).notNull().default(0),
+  inputTokens: bigint('input_tokens', { mode: 'number' }).notNull().default(0),
+  outputTokens: bigint('output_tokens', { mode: 'number' }).notNull().default(0),
+}, table => [
+  primaryKey({ columns: [table.guildId, table.utcDay] }),
+  index('ai_usage_day_idx').on(table.utcDay),
+  check('ai_usage_nonnegative_check', sql`${table.requests} >= 0 AND ${table.rejected} >= 0 AND
+    ${table.reservedCostMicros} >= 0 AND ${table.settledCostMicros} >= 0 AND
+    ${table.inputTokens} >= 0 AND ${table.outputTokens} >= 0`),
+]);
+
+export const aiRequests = pgTable('ai_requests', {
+  id: uuid('id').primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  requestKey: text('request_key').notNull(),
+  usageDay: date('usage_day', { mode: 'string' }).notNull(),
+  epoch: integer('epoch').notNull(),
+  status: text('status').notNull().default('RESERVED'),
+  modelId: text('model_id').notNull(),
+  reservedInputTokens: integer('reserved_input_tokens').notNull(),
+  reservedOutputTokens: integer('reserved_output_tokens').notNull(),
+  reservedCostMicros: bigint('reserved_cost_micros', { mode: 'number' }).notNull(),
+  actualInputTokens: integer('actual_input_tokens'),
+  actualOutputTokens: integer('actual_output_tokens'),
+  actualCostMicros: bigint('actual_cost_micros', { mode: 'number' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  leaseUntil: timestamp('lease_until', { withTimezone: true }).notNull(),
+  settledAt: timestamp('settled_at', { withTimezone: true }),
+}, table => [
+  uniqueIndex('ai_requests_guild_key_unique').on(table.guildId, table.requestKey),
+  index('ai_requests_user_created_idx').on(table.guildId, table.userId, table.createdAt),
+  index('ai_requests_live_idx').on(table.guildId, table.status, table.leaseUntil),
+  index('ai_requests_retention_idx').on(table.createdAt),
+  foreignKey({ columns: [table.guildId, table.usageDay], foreignColumns: [aiUsageDaily.guildId, aiUsageDaily.utcDay], name: 'ai_requests_usage_day_fk' }).onDelete('cascade'),
+  check('ai_requests_user_check', sql`${table.userId} ~ '^[0-9]{17,20}$'`),
+  check('ai_requests_key_check', sql`length(${table.requestKey}) BETWEEN 1 AND 128`),
+  check('ai_requests_status_check', sql`${table.status} IN ('RESERVED','SETTLED','EXPIRED')`),
+  check('ai_requests_epoch_check', sql`${table.epoch} >= 0`),
+  check('ai_requests_amount_check', sql`${table.reservedInputTokens} BETWEEN 0 AND 2048 AND
+    ${table.reservedOutputTokens} BETWEEN 1 AND 512 AND ${table.reservedCostMicros} >= 0 AND
+    (${table.actualInputTokens} IS NULL OR ${table.actualInputTokens} BETWEEN 0 AND 2048) AND
+    (${table.actualOutputTokens} IS NULL OR ${table.actualOutputTokens} BETWEEN 0 AND 512) AND
+    (${table.actualCostMicros} IS NULL OR ${table.actualCostMicros} BETWEEN 0 AND ${table.reservedCostMicros})`),
+  check('ai_requests_settlement_check', sql`(${table.status} = 'RESERVED' AND ${table.settledAt} IS NULL AND ${table.actualCostMicros} IS NULL) OR
+    (${table.status} <> 'RESERVED' AND ${table.settledAt} IS NOT NULL AND ${table.actualCostMicros} IS NOT NULL)`),
+]);
+
+// No V7.1 action executor is registered. JSON is bounded and validated again by typed registries.
+export const automations = pgTable('automations', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  enabled: boolean('enabled').notNull().default(false),
+  triggerKey: text('trigger_key').notNull(),
+  triggerVersion: integer('trigger_version').notNull(),
+  triggerConfig: jsonb('trigger_config').$type<Record<string, unknown>>().notNull().default({}),
+  configVersion: integer('config_version').notNull().default(1),
+  authorizedBy: text('authorized_by').notNull(),
+  approvedCapability: text('approved_capability').notNull(),
+  timezone: text('timezone').notNull().default('UTC'),
+  nextRunAt: timestamp('next_run_at', { withTimezone: true }),
+  cooldownSeconds: integer('cooldown_seconds').notNull().default(60),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  uniqueIndex('automations_guild_id_unique').on(table.guildId, table.id),
+  index('automations_due_idx').on(table.enabled, table.nextRunAt, table.id),
+  index('automations_guild_enabled_idx').on(table.guildId, table.enabled),
+  check('automations_name_check', sql`length(${table.name}) BETWEEN 1 AND 80`),
+  check('automations_trigger_check', sql`${table.triggerKey} IN ('SCHEDULED') AND ${table.triggerVersion} BETWEEN 1 AND 100`),
+  check('automations_config_check', sql`jsonb_typeof(${table.triggerConfig}) = 'object' AND octet_length(${table.triggerConfig}::text) <= 2048`),
+  check('automations_version_check', sql`${table.configVersion} BETWEEN 1 AND 2147483647`),
+  check('automations_authorizer_check', sql`${table.authorizedBy} ~ '^[0-9]{17,20}$'`),
+  check('automations_capability_check', sql`${table.approvedCapability} IN ('SEND_MESSAGE','STAFF_LOG')`),
+  check('automations_timezone_check', sql`length(${table.timezone}) BETWEEN 1 AND 64`),
+  check('automations_cooldown_check', sql`${table.cooldownSeconds} BETWEEN 0 AND 86400`),
+]);
+
+export const automationActions = pgTable('automation_actions', {
+  automationId: bigint('automation_id', { mode: 'number' }).notNull().references(() => automations.id, { onDelete: 'cascade' }),
+  position: integer('position').notNull(),
+  actionKey: text('action_key').notNull(),
+  actionVersion: integer('action_version').notNull(),
+  config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
+}, table => [
+  primaryKey({ columns: [table.automationId, table.position] }),
+  check('automation_actions_position_check', sql`${table.position} BETWEEN 0 AND 1`),
+  check('automation_actions_kind_check', sql`${table.actionKey} IN ('STATIC_MESSAGE','STAFF_LOG') AND ${table.actionVersion} BETWEEN 1 AND 100`),
+  check('automation_actions_config_check', sql`jsonb_typeof(${table.config}) = 'object' AND octet_length(${table.config}::text) <= 2048 AND
+    (${table.actionKey} <> 'STATIC_MESSAGE' OR length(coalesce(${table.config}->>'text', '')) <= 1000)`),
+]);
+
+export const automationExecutions = pgTable('automation_executions', {
+  id: uuid('id').primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  automationId: bigint('automation_id', { mode: 'number' }).notNull(),
+  triggerKey: text('trigger_key').notNull(),
+  status: text('status').notNull().default('PENDING'),
+  moduleEpoch: integer('module_epoch').notNull(),
+  configVersion: integer('config_version').notNull(),
+  causationId: uuid('causation_id'),
+  chainDepth: integer('chain_depth').notNull().default(0),
+  attempts: integer('attempts').notNull().default(0),
+  claimToken: uuid('claim_token'),
+  leaseUntil: timestamp('lease_until', { withTimezone: true }),
+  nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }),
+  safeErrorCode: text('safe_error_code'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+}, table => [
+  foreignKey({ columns: [table.guildId, table.automationId], foreignColumns: [automations.guildId, automations.id], name: 'automation_executions_guild_automation_fk' }).onDelete('cascade'),
+  uniqueIndex('automation_executions_trigger_unique').on(table.guildId, table.automationId, table.triggerKey),
+  index('automation_executions_due_idx').on(table.status, table.nextAttemptAt),
+  index('automation_executions_retention_idx').on(table.createdAt),
+  check('automation_executions_trigger_check', sql`length(${table.triggerKey}) BETWEEN 1 AND 128`),
+  check('automation_executions_status_check', sql`${table.status} IN ('PENDING','RUNNING','SUCCEEDED','SKIPPED','FAILED','UNCERTAIN')`),
+  check('automation_executions_bounds_check', sql`${table.moduleEpoch} >= 0 AND ${table.configVersion} > 0 AND
+    ${table.chainDepth} BETWEEN 0 AND 2 AND ${table.attempts} BETWEEN 0 AND 5`),
+  check('automation_executions_error_check', sql`${table.safeErrorCode} IS NULL OR ${table.safeErrorCode} ~ '^[A-Z_]{1,40}$'`),
+]);
+
+export const automationActionRuns = pgTable('automation_action_runs', {
+  executionId: uuid('execution_id').notNull().references(() => automationExecutions.id, { onDelete: 'cascade' }),
+  position: integer('position').notNull(),
+  status: text('status').notNull().default('PENDING'),
+  attempts: integer('attempts').notNull().default(0),
+  discordMessageId: text('discord_message_id'),
+  safeErrorCode: text('safe_error_code'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [
+  primaryKey({ columns: [table.executionId, table.position] }),
+  check('automation_action_runs_position_check', sql`${table.position} BETWEEN 0 AND 1`),
+  check('automation_action_runs_status_check', sql`${table.status} IN ('PENDING','RUNNING','SUCCEEDED','SKIPPED','FAILED','UNCERTAIN')`),
+  check('automation_action_runs_attempt_check', sql`${table.attempts} BETWEEN 0 AND 5`),
+  check('automation_action_runs_message_check', sql`${table.discordMessageId} IS NULL OR ${table.discordMessageId} ~ '^[0-9]{17,20}$'`),
+  check('automation_action_runs_error_check', sql`${table.safeErrorCode} IS NULL OR ${table.safeErrorCode} ~ '^[A-Z_]{1,40}$'`),
+]);

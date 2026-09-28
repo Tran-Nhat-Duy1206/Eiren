@@ -10,7 +10,8 @@ import { guilds, moderationCases, moderatorNotes, verificationSettings, memberVe
   communityEvents, eventParticipants, eventAttendance, eventReminders, giveaways as giveawayRows,
   giveawayEntries, giveawayDraws, giveawayWinners, tempvoiceSettings, tempvoiceRooms, memberAchievements,
   analyticsSettings, analyticsGuildHourly, analyticsChannelHourly, analyticsCommandHourly, analyticsEventDedupe,
-  analyticsMemberState, analyticsActiveVoiceSessions, dashboardSessions, dashboardAuditLog } from '../core/database/schema.js';
+  analyticsMemberState, analyticsActiveVoiceSessions, dashboardSessions, dashboardAuditLog,
+  aiSettings, aiUsageDaily, aiRequests, automations, automationActions, automationExecutions, automationActionRuns } from '../core/database/schema.js';
 import { createLogger } from '../core/logger/logger.js';
 import { registerCommands } from '../core/commands/dispatcher.js';
 import { registerComponents, registerSelects } from '../core/components/component.js';
@@ -64,6 +65,8 @@ import { AchievementsService } from '../modules/achievements/service.js';
 import { V5Scheduler, ScheduledStageError } from './v5-scheduler.js';
 import { AnalyticsMaintenanceError, AnalyticsRepository } from '../modules/analytics/repository.js';
 import { AnalyticsService } from '../modules/analytics/service.js';
+import { AiRepository } from '../modules/ai/repository.js';
+import { AiService } from '../modules/ai/service.js';
 import { observedHumanVoice } from '../modules/analytics/voice-snapshot.js';
 import { DashboardAuth } from '../dashboard/auth/dashboard-auth.js';
 import { DashboardAccess } from '../dashboard/access/dashboard-access.js';
@@ -162,6 +165,12 @@ const giveaways = new GiveawayService(new GiveawayRepository(db), permissions, m
 const tempvoice = new TempvoiceService(new TempvoiceRepository(db), permissions, logger,
   async guildId => new DiscordTempvoiceGateway(await client.guilds.fetch(guildId)));
 const analytics = new AnalyticsService(new AnalyticsRepository(db), permissions, modules);
+// V7.1 has no provider gateway, commands, scheduler work, or Discord side effects.
+const ai = new AiService(new AiRepository(db), permissions, env.AI ? {
+  providerId: env.AI.providerId, models: env.AI.models, policy: env.AI.policy,
+  timeoutMs: env.AI.timeoutMs, globalDailyBudgetMicros: env.AI.globalDailyBudgetMicros,
+  globalMonthlyBudgetMicros: env.AI.globalMonthlyBudgetMicros,
+} : null);
 const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
   baseUrl: env.DASHBOARD.DASHBOARD_BASE_URL, sessionSecret: env.DASHBOARD.DASHBOARD_SESSION_SECRET,
   discordClientId: env.DISCORD_CLIENT_ID, discordClientSecret: env.DASHBOARD.DISCORD_CLIENT_SECRET,
@@ -169,7 +178,7 @@ const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
 });
 let dashboard: Awaited<ReturnType<typeof createDashboardServer>> | undefined;
 const services = { logger, repository, guildConfig, permissions, modules, guildLogs, moderation, verification, antiraid,
-  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements, analytics };
+  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements, analytics, ai };
 const scheduler = new ModerationScheduler(moderation, async guildId => {
   const guild = await client.guilds.fetch(guildId);
   if (!client.user) throw new Error('Bot not logged in');
@@ -284,6 +293,13 @@ const lifecycle = createBotLifecycle({
     await db.select({ id: analyticsEventDedupe.guildId }).from(analyticsEventDedupe).limit(1);
     await db.select({ id: analyticsMemberState.guildId }).from(analyticsMemberState).limit(1);
     await db.select({ id: analyticsActiveVoiceSessions.guildId }).from(analyticsActiveVoiceSessions).limit(1);
+    await db.select({ id: aiSettings.guildId }).from(aiSettings).limit(1);
+    await db.select({ id: aiUsageDaily.guildId }).from(aiUsageDaily).limit(1);
+    await db.select({ id: aiRequests.id }).from(aiRequests).limit(1);
+    await db.select({ id: automations.id }).from(automations).limit(1);
+    await db.select({ id: automationActions.automationId }).from(automationActions).limit(1);
+    await db.select({ id: automationExecutions.id }).from(automationExecutions).limit(1);
+    await db.select({ id: automationActionRuns.executionId }).from(automationActionRuns).limit(1);
     if (dashboardAuth) {
       await db.select({ id: dashboardSessions.tokenHash }).from(dashboardSessions).limit(1);
       await db.select({ id: dashboardAuditLog.id }).from(dashboardAuditLog).limit(1);
