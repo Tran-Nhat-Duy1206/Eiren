@@ -1,0 +1,209 @@
+import Fastify, { type FastifyInstance } from 'fastify';
+import cookie from '@fastify/cookie';
+import formbody from '@fastify/formbody';
+import helmet from '@fastify/helmet';
+import rateLimit from '@fastify/rate-limit';
+import { z } from 'zod';
+import { PermissionFlagsBits, type Client } from 'discord.js';
+import type { Services } from '../app/services.js';
+import type { Actor, PermissionLevel } from '../core/permissions/permission-service.js';
+import type { ModerationGateway } from '../modules/moderation/service.js';
+import type { DashboardAuth } from './auth/dashboard-auth.js';
+import type { DashboardAccess } from './access/dashboard-access.js';
+import type { DashboardReadService } from './data/dashboard-read-service.js';
+import { AppError } from '../core/errors/errors.js';
+import { renderLogin, renderGuildPicker, renderPage, dashboardCss } from './ui.js';
+
+const snowflake = z.string().regex(/^\d{17,20}$/);
+const numberId = z.coerce.number().int().positive().safe();
+const pages = ['overview', 'moderation', 'members', 'roles', 'tickets', 'suggestions', 'levels', 'events', 'giveaways', 'analytics', 'settings'] as const;
+type Page = typeof pages[number];
+const pageLevel: Record<Page, PermissionLevel> = { overview: 'HELPER', moderation: 'MODERATOR', members: 'HELPER', roles: 'ADMIN', tickets: 'HELPER', suggestions: 'HELPER', levels: 'HELPER', events: 'HELPER', giveaways: 'HELPER', analytics: 'HELPER', settings: 'ADMIN' };
+const pageModule: Partial<Record<Page, string>> = { moderation: 'moderation', tickets: 'tickets', suggestions: 'suggestions', levels: 'levels', events: 'events', giveaways: 'giveaways' };
+type CookieValue = ReturnType<DashboardAuth['clearSessionCookie']>;
+type Session = NonNullable<Awaited<ReturnType<DashboardAuth['getSession']>>>;
+export interface DashboardWebDeps {
+  client: Client;
+  services: Services;
+  auth: Pick<DashboardAuth, 'startOAuth' | 'completeOAuth' | 'clearStateCookie' | 'clearSessionCookie' | 'getSession' | 'revokeSession' | 'csrfToken' | 'verifyCsrf'>;
+  access: Pick<DashboardAccess, 'authorize' | 'listAccessible'>;
+  read: DashboardReadService;
+  audit: { record(input: { guildId: string; actorUserId: string; action: string; targetType: string; targetId?: string; success: boolean; requestId: string }): Promise<unknown> };
+  analytics?: { summary(guildId: string, range: '24h' | '7d' | '30d' | '90d', timezone?: string): Promise<unknown>; configure?(actor: Actor, days: number): Promise<unknown> };
+  moderationGatewayForGuild?: (guildId: string) => Promise<ModerationGateway>;
+  trustProxy?: boolean;
+  secureCookies?: boolean;
+  baseUrl?: string; // Canonical public dashboard URL; required to enforce Origin on mutations.
+  logger?: { error(data: unknown, message?: string): void };
+}
+const bodySchema = z.record(z.string(), z.union([z.string().max(500), z.undefined()]));
+const actions: Record<string, { level: PermissionLevel; page: Page; module?: string; execute: (d: DashboardWebDeps, guildId: string, actor: Actor, b: Record<string, string>) => Promise<unknown>; target?: string }> = {
+  'module-toggle': { level: 'ADMIN', page: 'settings', execute: (d, g, a, b) => d.services.modules.setEnabled(g, z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/).parse(b.module), z.enum(['true', 'false']).parse(b.enabled) === 'true', a.userId), target: 'module' },
+  'guild-timezone': { level: 'ADMIN', page: 'settings', execute: (d, g, _a, b) => d.services.guildConfig.update(g, 'timezone', z.string().min(1).max(64).parse(b.timezone)) },
+  'moderation-warn': { level: 'MODERATOR', page: 'moderation', module: 'moderation', execute: async (d, g, a, b) => { if (!d.moderationGatewayForGuild) throw new Error('Moderation gateway unavailable'); return d.services.moderation.perform({ actor: a, action: 'WARN', targetId: snowflake.parse(b.targetId), reason: z.string().trim().min(1).max(400).parse(b.reason) }, await d.moderationGatewayForGuild(g)); }, target: 'targetId' },
+  'ticket-close': { level: 'MODERATOR', page: 'tickets', module: 'tickets', execute: (d, _g, a, b) => d.services.tickets.close(a, numberId.parse(b.id), z.string().trim().min(1).max(400).parse(b.reason)), target: 'id' },
+  'suggestion-status': { level: 'MODERATOR', page: 'suggestions', module: 'suggestions', execute: (d, _g, a, b) => d.services.suggestions.status(a, numberId.parse(b.id), z.enum(['PENDING', 'UNDER_REVIEW', 'ACCEPTED', 'REJECTED', 'IMPLEMENTED']).parse(b.status)), target: 'id' },
+  'levels-config': { level: 'ADMIN', page: 'levels', module: 'levels', execute: (d, g, _a, b) => d.services.levels.configure(g, { minLength: z.coerce.number().int().min(0).max(2000).parse(b.minLength) }) },
+  'event-cancel': { level: 'MODERATOR', page: 'events', module: 'events', execute: (d, _g, a, b) => d.services.events.transition(a, numberId.parse(b.id), 'cancel'), target: 'id' },
+  'giveaway-end': { level: 'MODERATOR', page: 'giveaways', module: 'giveaways', execute: (d, _g, a, b) => d.services.giveaways.end(a, numberId.parse(b.id)), target: 'id' },
+  'analytics-toggle': { level: 'ADMIN', page: 'analytics', execute: (d, g, a, b) => d.services.modules.setEnabled(g, 'analytics', z.enum(['true', 'false']).parse(b.enabled) === 'true', a.userId) },
+  'analytics-retention': { level: 'ADMIN', page: 'analytics', execute: (d, g, _a, b) => { if (!d.analytics?.configure) throw new Error('Analytics retention unavailable'); return d.analytics.configure(_a, z.coerce.number().int().min(30).max(730).parse(b.days)); } },
+  'role-set': { level: 'GUILD_OWNER', page: 'roles', execute: async (d, g, a, b) => {
+    const roleId = snowflake.parse(b.roleId);
+    const guild = await d.client.guilds.fetch({ guild: g, force: true });
+    const role = await guild.roles.fetch(roleId);
+    const unsafe = PermissionFlagsBits.Administrator | PermissionFlagsBits.ManageGuild | PermissionFlagsBits.ManageRoles |
+      PermissionFlagsBits.MentionEveryone | PermissionFlagsBits.ManageWebhooks;
+    if (!role || role.id === g || role.managed || !role.editable || role.permissions.any(unsafe))
+      throw new AppError('VALIDATION', 'Choose a non-managed, hierarchy-safe staff role without dangerous permissions.');
+    return d.services.permissions.setRole(a, roleId, z.enum(['HELPER', 'MODERATOR', 'SENIOR_MODERATOR', 'ADMIN']).parse(b.level), d.services.repository);
+  }, target: 'roleId' },
+  'role-remove': { level: 'GUILD_OWNER', page: 'roles', execute: (d, _g, a, b) => d.services.permissions.removeRole(a, snowflake.parse(b.roleId), d.services.repository), target: 'roleId' },
+};
+const confirmedActions = new Set(['module-toggle', 'moderation-warn', 'ticket-close', 'event-cancel', 'giveaway-end', 'analytics-toggle', 'role-set', 'role-remove']);
+const params = z.object({ guildId: snowflake, page: z.string().optional(), action: z.string().optional() });
+function cookieHeader(raw: string | undefined, name: string): string | undefined { const part = raw?.split(';').map(x => x.trim()).find(x => x.startsWith(`${name}=`)); return part?.slice(name.length + 1); }
+function setCookie(reply: { setCookie(name: string, value: string, options: CookieValue['options']): unknown }, value: CookieValue) { reply.setCookie(value.name, value.value, value.options); }
+
+/** Audit is written after the domain operation; if audit persistence fails the operation may already have committed. Never automatically retry that mutation. */
+export async function createDashboardServer(deps: DashboardWebDeps): Promise<FastifyInstance> {
+  if (!deps.baseUrl) throw new Error('Dashboard canonical baseUrl is required');
+  const canonical = new URL(deps.baseUrl);
+  if (!['http:', 'https:'].includes(canonical.protocol) || canonical.username || canonical.password || canonical.search || canonical.hash || canonical.pathname !== '/') throw new Error('Invalid dashboard baseUrl');
+  const app = Fastify({ trustProxy: deps.trustProxy === true, bodyLimit: 32 * 1024, logger: false, requestIdHeader: false });
+  await app.register(cookie);
+  await app.register(formbody);
+  await app.register(helmet, { contentSecurityPolicy: { directives: { defaultSrc: ["'none'"], styleSrc: ["'self'"], imgSrc: ["'self'"], baseUri: ["'none'"], formAction: ["'self'"], frameAncestors: ["'none'"], scriptSrc: ["'none'"] } } });
+  await app.register(rateLimit, { global: true, max: 120, timeWindow: '1 minute' });
+  app.addHook('onRequest', async (request, reply) => { reply.header('cache-control', 'no-store'); });
+  app.setErrorHandler((error, request, reply) => {
+    const code = 'statusCode' in Object(error) ? (error as { statusCode?: number }).statusCode : undefined;
+    const status = code === 413 || (error as { code?: string }).code === 'FST_ERR_CTP_BODY_TOO_LARGE' ? 413 : code === 429 ? 429 : code === 415 ? 415 : error instanceof z.ZodError ? 400 : error instanceof AppError
+      ? ({ PERMISSION: 403, NOT_FOUND: 404, VALIDATION: 400, CONFLICT: 409, DISABLED: 409, DATABASE: 500 } as const)[error.code] : 500;
+    deps.logger?.error({ requestId: request.id, errorType: error instanceof Error ? error.name : 'unknown' }, 'Dashboard request failed');
+    reply.code(status).type('text/plain; charset=utf-8').send(`${status === 403 ? 'Permission denied' : status === 404 ? 'Not found' : 'Request failed'} (${request.id})`);
+  });
+  app.get('/healthz', async () => ({ status: 'ok' }));
+  app.get('/assets/dashboard.css', async (_request, reply) => reply.header('cache-control', 'public, max-age=3600').type('text/css').send(dashboardCss()));
+  app.get('/login', async (_request, reply) => reply.type('text/html').send(renderLogin()));
+  app.get('/auth/discord', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (_request, reply) => { const result = await deps.auth.startOAuth(); setCookie(reply, result.stateCookie); return reply.redirect(result.authorizationUrl); });
+  app.get('/auth/callback', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+    try {
+      const query = z.object({ code: z.string().min(1).max(2048), state: z.string().min(1).max(2048) }).parse(request.query);
+      const state = deps.auth.clearStateCookie().name;
+      const result = await deps.auth.completeOAuth(query.code, query.state, request.cookies[state]);
+      await deps.auth.revokeSession(request.cookies[deps.auth.clearSessionCookie().name]);
+      setCookie(reply, result.clearStateCookie); setCookie(reply, result.sessionCookie);
+      return reply.redirect('/guilds');
+    } catch { setCookie(reply, deps.auth.clearStateCookie()); return reply.code(400).type('text/html').send(renderLogin('Sign-in failed. Please try again.')); }
+  });
+  const sessionFor = async (request: { headers: { cookie?: string }; sessionCookie?: CookieValue }, reply?: { setCookie(name: string, value: string, options: CookieValue['options']): unknown }): Promise<Session | null> => {
+    const raw = cookieHeader(request.headers.cookie, deps.auth.clearSessionCookie().name);
+    const session = await deps.auth.getSession(raw);
+    if (session && raw && reply) { const seconds = Math.max(0, Math.floor((Math.min(session.expiresAt.getTime(), session.absoluteExpiresAt.getTime()) - Date.now()) / 1000)); if (seconds > 0) reply.setCookie(deps.auth.clearSessionCookie().name, raw, { path: '/', httpOnly: true, sameSite: 'lax', secure: deps.secureCookies !== false, maxAge: seconds }); }
+    return session;
+  };
+  const originValid = (request: { headers: { origin?: string } }): boolean => { try { const value = request.headers.origin; return !!value && new URL(value).origin === canonical.origin && value === canonical.origin; } catch { return false; } };
+  app.post('/logout', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const raw = request.headers.cookie; const session = await sessionFor(request, reply);
+    if (!session) return reply.code(401).send('Unauthorized');
+    const body = bodySchema.parse(request.body);
+    if (!originValid(request) || !deps.auth.verifyCsrf(cookieHeader(raw, deps.auth.clearSessionCookie().name), body.csrfToken ?? '')) return reply.code(403).send('Forbidden');
+    await deps.auth.revokeSession(cookieHeader(raw, deps.auth.clearSessionCookie().name)); setCookie(reply, deps.auth.clearSessionCookie()); return reply.redirect('/login', 303);
+  });
+  app.get('/', async (request, reply) => reply.redirect(await sessionFor(request) ? '/guilds' : '/login'));
+  app.get('/guilds', async (request, reply) => {
+    const session = await sessionFor(request, reply);
+    if (!session) return reply.redirect('/login');
+    const csrf = deps.auth.csrfToken(cookieHeader(request.headers.cookie, deps.auth.clearSessionCookie().name)) ?? '';
+    return reply.type('text/html').send(renderGuildPicker(await deps.access.listAccessible(session), csrf));
+  });
+  app.get('/g/:guildId/:page', async (request, reply) => {
+    const { guildId, page: rawPage } = params.parse(request.params);
+    if (!pages.includes(rawPage as Page)) return reply.code(404).send('Not found');
+    const page = rawPage as Page;
+    const session = await sessionFor(request, reply); if (!session) return reply.redirect('/login');
+    const actor = await deps.access.authorize(guildId, session, pageLevel[page]);
+    const disabledModule = pageModule[page] && !await deps.services.modules.isEnabled(guildId, pageModule[page]) ? pageModule[page] : undefined;
+    const currentGuild = await deps.client.guilds.fetch({ guild: guildId, force: true });
+    if (!currentGuild || currentGuild.id !== guildId) return reply.code(403).send('Guild unavailable');
+    const guildName = currentGuild.name;
+    if (disabledModule) return reply.type('text/html').send(renderPage({ page, guildId, guildName,
+      csrfToken: deps.auth.csrfToken(cookieHeader(request.headers.cookie, deps.auth.clearSessionCookie().name)) ?? '',
+      actorLevel: await deps.services.permissions.resolve(actor), disabledModule }));
+    let data: unknown;
+    if (page === 'analytics') {
+      const { range } = z.object({ range: z.enum(['24h', '7d', '30d', '90d']).default('7d') }).parse(request.query);
+      if (await deps.services.modules.isEnabled(guildId, 'analytics')) {
+        const timezone = (await deps.services.guildConfig.get(guildId))?.timezone ?? 'UTC';
+        data = { ...(await (deps.analytics ?? deps.services.analytics).summary(guildId, range, timezone) as object),
+          currentMemberCount: currentGuild.memberCount };
+      }
+    }
+    else if (page === 'members') {
+      const query = z.object({ userId: snowflake.optional() }).parse(request.query);
+      if (query.userId) {
+        try {
+          const guild = await deps.client.guilds.fetch({ guild: guildId, force: true });
+          const member = await guild.members.fetch({ user: query.userId, force: true });
+          if (!member || member.id !== query.userId || member.guild.id !== guildId) return reply.code(404).send('Not found');
+          data = {
+            member: { userId: member.id, username: member.user.username, joinedAt: member.joinedAt,
+              permission: await deps.services.permissions.resolve({ userId: member.id, guildId,
+                guildOwnerId: guild.ownerId, roleIds: [...member.roles.cache.keys()] }) },
+            levels: await deps.read.memberLookup(guildId, [query.userId]),
+            reputation: await deps.services.reputation.score(guildId, member.id),
+            achievements: await deps.services.achievements.listMember(guildId, member.id),
+          };
+        } catch { return reply.code(403).send('Member lookup unavailable'); }
+      } else data = [];
+    }
+    else if (page === 'overview') data = { identity: { id: guildId, name: guildName, memberCount: currentGuild.memberCount }, ...await deps.read.overview(guildId), analyticsEnabled: await deps.services.modules.isEnabled(guildId, 'analytics') };
+    else if (page === 'moderation') {
+      const query = z.object({ caseId: numberId.optional() }).parse(request.query);
+      data = query.caseId ? { case: await deps.services.moderation.getCase(actor, query.caseId), reports: await deps.read.listReports(guildId) }
+        : { cases: await deps.read.listCases(guildId), reports: await deps.read.listReports(guildId) };
+    }
+    else if (page === 'roles') data = await deps.read.roles(guildId);
+    else if (page === 'tickets') data = await deps.read.tickets(guildId);
+    else if (page === 'suggestions') data = await deps.read.suggestions(guildId);
+    else if (page === 'levels') data = await deps.read.levels(guildId);
+    else if (page === 'events') data = await deps.read.events(guildId);
+    else if (page === 'giveaways') data = await deps.read.giveaways(guildId);
+    else data = await deps.read.botSettings(guildId);
+    const query = request.query as { range?: string; userId?: string };
+    return reply.type('text/html').send(renderPage({ page, guildId, guildName,
+      csrfToken: deps.auth.csrfToken(cookieHeader(request.headers.cookie, deps.auth.clearSessionCookie().name)) ?? '', data,
+      analyticsEnabled: page !== 'analytics' || await deps.services.modules.isEnabled(guildId, 'analytics'),
+      actorLevel: await deps.services.permissions.resolve(actor),
+      range: page === 'analytics' && ['24h', '7d', '30d', '90d'].includes(query.range ?? '') ? query.range : undefined,
+      userId: page === 'members' && snowflake.safeParse(query.userId).success ? query.userId : undefined,
+    }));
+  });
+  app.post('/g/:guildId/action/:action', { config: { rateLimit: { max: 15, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const parsed = params.safeParse(request.params); if (!parsed.success) return reply.code(404).send('Not found');
+    const { guildId, action: name } = parsed.data; const action = actions[name ?? '']; if (!action) return reply.code(404).send('Not found');
+    const raw = request.headers.cookie; const session = await sessionFor(request, reply); if (!session) return reply.code(401).send('Unauthorized');
+    let actor: Actor | undefined; let succeeded = false; let attempted = false;
+    try {
+      const body = bodySchema.parse(request.body) as Record<string, string>;
+      if (!originValid(request) || !deps.auth.verifyCsrf(cookieHeader(raw, deps.auth.clearSessionCookie().name), body.csrfToken ?? '') ||
+        (confirmedActions.has(name!) && body.confirm !== 'yes')) return reply.code(403).send('Forbidden');
+      actor = await deps.access.authorize(guildId, session, action.level);
+      if (action.module && !await deps.services.modules.isEnabled(guildId, action.module)) return reply.code(404).send('Not found');
+      attempted = true;
+      await action.execute(deps, guildId, actor, body); succeeded = true;
+      try { await deps.audit.record({ guildId, actorUserId: actor.userId, action: name!, targetType: name!, targetId: action.target ? body[action.target] : undefined, success: true, requestId: request.id }); }
+      catch (auditError) { deps.logger?.error({ requestId: request.id, errorType: auditError instanceof Error ? auditError.name : 'unknown' }, 'Dashboard success audit persistence failed'); }
+      return reply.redirect(`/g/${guildId}/${action.page}`, 303);
+    } catch (error) {
+      if (attempted && !succeeded && actor) {
+        try { await deps.audit.record({ guildId, actorUserId: actor.userId, action: name!, targetType: name!, success: false, requestId: request.id }); }
+        catch (auditError) { deps.logger?.error({ requestId: request.id, errorType: auditError instanceof Error ? auditError.name : 'unknown' }, 'Dashboard failure audit persistence failed'); }
+      }
+      deps.logger?.error({ requestId: request.id, errorType: error instanceof Error ? error.name : 'unknown', postMutationAuditFailure: succeeded }, 'Dashboard mutation failed');
+      return reply.code(error instanceof z.ZodError ? 400 : error instanceof AppError && error.code === 'PERMISSION' ? 403 : 500).type('text/plain').send(`Action failed (${request.id})${succeeded ? '; action may have completed, check status before retrying' : ''}`);
+    }
+  });
+  return app;
+}

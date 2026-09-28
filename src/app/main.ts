@@ -8,7 +8,9 @@ import { guilds, moderationCases, moderatorNotes, verificationSettings, memberVe
   levelsSettings, memberLevels, levelRewards, levelIgnoredChannels, reputationSettings, memberReputation,
   reputationGrants, starboardSettings, starboardMessages, starboardIgnoredChannels,
   communityEvents, eventParticipants, eventAttendance, eventReminders, giveaways as giveawayRows,
-  giveawayEntries, giveawayDraws, giveawayWinners, tempvoiceSettings, tempvoiceRooms, memberAchievements } from '../core/database/schema.js';
+  giveawayEntries, giveawayDraws, giveawayWinners, tempvoiceSettings, tempvoiceRooms, memberAchievements,
+  analyticsSettings, analyticsGuildHourly, analyticsChannelHourly, analyticsCommandHourly, analyticsEventDedupe,
+  analyticsMemberState, analyticsActiveVoiceSessions, dashboardSessions, dashboardAuditLog } from '../core/database/schema.js';
 import { createLogger } from '../core/logger/logger.js';
 import { registerCommands } from '../core/commands/dispatcher.js';
 import { registerComponents, registerSelects } from '../core/components/component.js';
@@ -59,7 +61,15 @@ import { TempvoiceService } from '../modules/tempvoice/service.js';
 import { DiscordTempvoiceGateway } from '../modules/tempvoice/discord-gateway.js';
 import { AchievementRepository } from '../modules/achievements/repository.js';
 import { AchievementsService } from '../modules/achievements/service.js';
-import { V5Scheduler } from './v5-scheduler.js';
+import { V5Scheduler, ScheduledStageError } from './v5-scheduler.js';
+import { AnalyticsMaintenanceError, AnalyticsRepository } from '../modules/analytics/repository.js';
+import { AnalyticsService } from '../modules/analytics/service.js';
+import { observedHumanVoice } from '../modules/analytics/voice-snapshot.js';
+import { DashboardAuth } from '../dashboard/auth/dashboard-auth.js';
+import { DashboardAccess } from '../dashboard/access/dashboard-access.js';
+import { DashboardAudit } from '../dashboard/access/dashboard-audit.js';
+import { DashboardReadService } from '../dashboard/data/dashboard-read-service.js';
+import { createDashboardServer } from '../dashboard/web.js';
 
 const env = loadEnv();
 const logger = createLogger(env.LOG_LEVEL);
@@ -151,17 +161,75 @@ const giveaways = new GiveawayService(new GiveawayRepository(db), permissions, m
   (guildId, userId) => achievementHook(guildId, userId, () => achievements.onGiveawayWin(guildId, userId)));
 const tempvoice = new TempvoiceService(new TempvoiceRepository(db), permissions, logger,
   async guildId => new DiscordTempvoiceGateway(await client.guilds.fetch(guildId)));
+const analytics = new AnalyticsService(new AnalyticsRepository(db), permissions, modules);
+const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
+  baseUrl: env.DASHBOARD.DASHBOARD_BASE_URL, sessionSecret: env.DASHBOARD.DASHBOARD_SESSION_SECRET,
+  discordClientId: env.DISCORD_CLIENT_ID, discordClientSecret: env.DASHBOARD.DISCORD_CLIENT_SECRET,
+  secureCookies: new URL(env.DASHBOARD.DASHBOARD_BASE_URL).protocol === 'https:',
+});
+let dashboard: Awaited<ReturnType<typeof createDashboardServer>> | undefined;
 const services = { logger, repository, guildConfig, permissions, modules, guildLogs, moderation, verification, antiraid,
-  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements };
+  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements, analytics };
 const scheduler = new ModerationScheduler(moderation, async guildId => {
   const guild = await client.guilds.fetch(guildId);
   if (!client.user) throw new Error('Bot not logged in');
   return new DiscordModerationGateway(guild, client.user.id);
 }, logger);
+let analyticsGuildCursor = 0;
+let analyticsReady = false;
+let analyticsReconcile: Promise<void> | undefined;
+async function reconcileAnalyticsVoice() {
+  try {
+    for (const guild of [...client.guilds.cache.values()].slice(0, 5)) {
+      try {
+        if (!await modules.isEnabled(guild.id, 'analytics')) continue;
+        const boundary = await analytics.voiceBoundary(guild.id);
+        if (!boundary) continue;
+        const live = await observedHumanVoice(guild);
+        if (live !== null) await analytics.reconcileVoice(guild.id, live, boundary.cutoff, new Date(),
+          boundary.epoch, boundary.sequence);
+        else logger.warn({ guildId: guild.id }, 'Incomplete voice snapshot; analytics recovery deferred');
+      } catch (error) { logger.warn({ guildId: guild.id, errorType: error instanceof Error ? error.name : 'unknown' },
+        'Voice analytics restart reconciliation failed; stale time is not counted'); }
+    }
+  } finally {
+    analyticsReady = true;
+    logger.debug('Voice analytics startup reconciliation complete');
+  }
+}
+async function analyticsDue() {
+  if (!analyticsReady) return;
+  const runStage = async <T>(stage: string, work: () => Promise<T>): Promise<T> => {
+    try { return await work(); }
+    catch (error) { throw new ScheduledStageError(error instanceof AnalyticsMaintenanceError ? `${stage}.${error.stage}` : stage, error); }
+  };
+  await runStage('analytics.runDue', () => analytics.runDue());
+  if (dashboardAuth) await runStage('dashboardAuth.cleanupExpired', () => dashboardAuth.cleanupExpired());
+  // V5 scheduler bounds the number of guilds sampled per tick; Discord's observed
+  // voice-state cache is proof of current presence, never assume stale DB sessions are live.
+  const guildList = [...client.guilds.cache.values()];
+  if (!guildList.length) return;
+  for (let i = 0; i < Math.min(5, guildList.length); i++) {
+    const guild = guildList[analyticsGuildCursor++ % guildList.length]!;
+    const enabled = await runStage('analytics.moduleCheck', () => modules.isEnabled(guild.id, 'analytics'));
+    if (!enabled) { analytics.invalidateVoice(guild.id); continue; }
+    const boundary = await runStage('analytics.voiceBoundary', () => analytics.voiceBoundary(guild.id));
+    if (!boundary) { analytics.invalidateVoice(guild.id); continue; }
+    const live = await runStage('analytics.observedHumanVoice', () => observedHumanVoice(guild));
+    if (live === null) continue;
+    const baselineAt = new Date();
+    if (!analytics.isVoiceReady(guild.id)) {
+      await runStage('analytics.reconcileVoice', () => analytics.reconcileVoice(guild.id, live, boundary.cutoff,
+        baselineAt, boundary.epoch, boundary.sequence));
+    } else await runStage('analytics.heartbeat', () => analytics.heartbeat(guild.id, live, boundary.cutoff,
+      1000, baselineAt, boundary.sequence));
+  }
+}
 const v5Scheduler = new V5Scheduler([
   { name: 'events', runDue: async () => { await events.runDue(); } },
   { name: 'giveaways', runDue: async () => { await giveaways.runDue(); } },
   { name: 'tempvoice', runDue: async () => { await tempvoice.runDue(); } },
+  { name: 'analytics', runDue: analyticsDue },
 ], logger);
 let retentionTimer: NodeJS.Timeout | undefined;
 async function pruneHistory() {
@@ -209,6 +277,17 @@ const lifecycle = createBotLifecycle({
     await db.select({ id: tempvoiceSettings.guildId }).from(tempvoiceSettings).limit(1);
     await db.select({ id: tempvoiceRooms.id }).from(tempvoiceRooms).limit(1);
     await db.select({ id: memberAchievements.guildId }).from(memberAchievements).limit(1);
+    await db.select({ id: analyticsSettings.guildId }).from(analyticsSettings).limit(1);
+    await db.select({ id: analyticsGuildHourly.guildId }).from(analyticsGuildHourly).limit(1);
+    await db.select({ id: analyticsChannelHourly.guildId }).from(analyticsChannelHourly).limit(1);
+    await db.select({ id: analyticsCommandHourly.guildId }).from(analyticsCommandHourly).limit(1);
+    await db.select({ id: analyticsEventDedupe.guildId }).from(analyticsEventDedupe).limit(1);
+    await db.select({ id: analyticsMemberState.guildId }).from(analyticsMemberState).limit(1);
+    await db.select({ id: analyticsActiveVoiceSessions.guildId }).from(analyticsActiveVoiceSessions).limit(1);
+    if (dashboardAuth) {
+      await db.select({ id: dashboardSessions.tokenHash }).from(dashboardSessions).limit(1);
+      await db.select({ id: dashboardAuditLog.id }).from(dashboardAuditLog).limit(1);
+    }
   },
   register() {
     registerCommands(client, registry.commands, services);
@@ -219,15 +298,39 @@ const lifecycle = createBotLifecycle({
       scheduler.start();
       void tempvoice.reconcileActive().catch(error => logger.error({ errorType: error instanceof Error ? error.name : 'unknown' },
         'Temporary voice startup reconciliation failed'));
+      analyticsReconcile = reconcileAnalyticsVoice().catch(error => logger.warn({ errorType: error instanceof Error ? error.name : 'unknown' },
+        'Voice analytics startup recovery failed'));
       v5Scheduler.start();
       void pruneHistory();
       retentionTimer = setInterval(() => { void pruneHistory(); }, 60 * 60_000);
       retentionTimer.unref();
     });
   },
-  login: () => client.login(env.DISCORD_TOKEN),
+  login: async () => {
+    await client.login(env.DISCORD_TOKEN);
+    if (env.DASHBOARD && dashboardAuth) {
+      dashboard = await createDashboardServer({
+        client, services, auth: dashboardAuth, access: new DashboardAccess(client, permissions),
+        read: new DashboardReadService(db), audit: new DashboardAudit(db), analytics,
+        baseUrl: env.DASHBOARD.DASHBOARD_BASE_URL, trustProxy: env.DASHBOARD.DASHBOARD_TRUST_PROXY,
+        secureCookies: new URL(env.DASHBOARD.DASHBOARD_BASE_URL).protocol === 'https:', logger,
+        moderationGatewayForGuild: async guildId => {
+          const guild = await client.guilds.fetch(guildId);
+          if (!client.user) throw new Error('Bot is unavailable');
+          return new DiscordModerationGateway(guild, client.user.id);
+        },
+      });
+      await dashboard.listen({ host: env.DASHBOARD.DASHBOARD_HOST, port: env.DASHBOARD.DASHBOARD_PORT });
+      logger.info({ host: env.DASHBOARD.DASHBOARD_HOST, port: env.DASHBOARD.DASHBOARD_PORT }, 'Dashboard listening');
+    }
+  },
   destroy: () => client.destroy(),
-  closeDatabase: async () => { if (retentionTimer) clearInterval(retentionTimer); await scheduler.stop(); await v5Scheduler.stop(); await pool.end(); },
+  closeDatabase: async () => {
+    if (retentionTimer) clearInterval(retentionTimer);
+    await dashboard?.close();
+    await analyticsReconcile;
+    await scheduler.stop(); await v5Scheduler.stop(); await pool.end();
+  },
 });
 async function shutdown() {
   logger.info('Shutting down');

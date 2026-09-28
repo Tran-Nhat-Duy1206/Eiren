@@ -19,6 +19,7 @@ import type { EventService } from '../modules/events/service.js';
 import type { GiveawayService } from '../modules/giveaways/service.js';
 import type { TempvoiceService } from '../modules/tempvoice/service.js';
 import type { AchievementsService } from '../modules/achievements/service.js';
+import type { AnalyticsService } from '../modules/analytics/service.js';
 
 export interface Services {
   logger: Logger;
@@ -42,4 +43,5 @@ export interface Services {
   giveaways: GiveawayService;
   tempvoice: TempvoiceService;
   achievements: AchievementsService;
+  analytics: AnalyticsService;
 }

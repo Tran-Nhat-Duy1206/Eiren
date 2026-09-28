@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { Database } from '../core/database/connection.js';
 import { guilds, guildSettings, guildModules, guildPermissionRoles } from '../core/database/schema.js';
 
@@ -44,9 +44,21 @@ export class GuildRepository {
     const [state] = await this.db.select().from(guildModules).where(and(eq(guildModules.guildId, guildId), eq(guildModules.moduleKey, moduleKey)));
     return state?.enabled;
   }
+  async getModuleEpoch(guildId: string, moduleKey: string) {
+    const [state] = await this.db.select({ version: guildModules.version }).from(guildModules)
+      .where(and(eq(guildModules.guildId, guildId), eq(guildModules.moduleKey, moduleKey)));
+    return state?.version ?? 0;
+  }
   async setModuleState(guildId: string, moduleKey: string, enabled: boolean, updatedBy: string) {
-    await this.db.insert(guildModules).values({ guildId, moduleKey, enabled, updatedBy })
-      .onConflictDoUpdate({ target: [guildModules.guildId, guildModules.moduleKey], set: { enabled, updatedBy, updatedAt: new Date() } });
+    const write = async (db: Database) => db.insert(guildModules).values({ guildId, moduleKey, enabled, updatedBy, version: 1 })
+      .onConflictDoUpdate({ target: [guildModules.guildId, guildModules.moduleKey],
+        set: { enabled, updatedBy, updatedAt: new Date(), version: sql`${guildModules.version} + 1` } });
+    if (moduleKey !== 'analytics') { await write(this.db); return; }
+    // Toggle and all voice writers share a guild advisory lock; a voice transaction rechecks this row.
+    await this.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${guildId}), 0)`);
+      await write(tx as unknown as Database);
+    });
   }
   async listModuleStates(guildId: string) {
     return this.db.select().from(guildModules).where(eq(guildModules.guildId, guildId));

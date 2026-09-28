@@ -30,6 +30,8 @@ import { giveawayButtons } from '../modules/giveaways/components.js';
 import { tempvoiceCommands } from '../modules/tempvoice/commands.js';
 import { tempvoiceEvents } from '../modules/tempvoice/events.js';
 import { achievementsCommands } from '../modules/achievements/commands.js';
+import { analyticsCommands } from '../modules/analytics/commands.js';
+import { analyticsEvents } from '../modules/analytics/events.js';
 
 export interface ModuleManifest {
   definition: ModuleDefinition;
@@ -41,7 +43,7 @@ export interface ModuleManifest {
 
 // New production modules contribute a manifest here; neither dispatcher needs editing.
 export const manifests: readonly ModuleManifest[] = [
-  { definition: { key: 'core', defaultEnabled: true }, commands: coreCommands, events: coreEvents },
+  { definition: { key: 'core', defaultEnabled: true }, commands: [...coreCommands, ...analyticsCommands], events: coreEvents },
   { definition: { key: 'moderation', defaultEnabled: false }, commands: moderationCommands, events: [] },
   { definition: { key: 'logging', defaultEnabled: false }, commands: [], events: loggingEvents },
   { definition: { key: 'verification', defaultEnabled: false }, commands: verificationCommands, events: verificationEvents, components: verificationButtons },
@@ -58,6 +60,7 @@ export const manifests: readonly ModuleManifest[] = [
   { definition: { key: 'giveaways', defaultEnabled: false }, commands: giveawayCommands, events: [], components: giveawayButtons },
   { definition: { key: 'tempvoice', defaultEnabled: false }, commands: tempvoiceCommands, events: tempvoiceEvents },
   { definition: { key: 'achievements', defaultEnabled: false }, commands: achievementsCommands, events: [] },
+  { definition: { key: 'analytics', defaultEnabled: false }, commands: [], events: analyticsEvents },
 ];
 
 export function buildRegistry(modules: readonly ModuleManifest[]) {

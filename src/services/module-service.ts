@@ -4,7 +4,9 @@ import type { GuildRepository } from '../repositories/guild-repository.js';
 export type ModuleDefinition = { key: string; defaultEnabled: boolean; dependencies?: readonly string[]; internal?: boolean };
 export class ModuleService {
   private readonly definitions: Map<string, ModuleDefinition>;
-  constructor(private readonly repository: Pick<GuildRepository, 'getModuleState' | 'setModuleState' | 'listModuleStates'>,
+  private readonly changeListeners = new Set<(guildId: string, key: string) => void>();
+  constructor(private readonly repository: Pick<GuildRepository, 'getModuleState' | 'setModuleState' | 'listModuleStates'> &
+    Partial<Pick<GuildRepository, 'getModuleEpoch'>>,
     definitions: readonly ModuleDefinition[], private readonly unavailable: ReadonlySet<string> = new Set()) {
     this.definitions = new Map(definitions.map(definition => [definition.key, definition]));
     if (this.definitions.size !== definitions.length || !this.definitions.has('core')) throw new Error('Invalid module registry');
@@ -21,6 +23,11 @@ export class ModuleService {
     }
     seen.delete(key);
     return true;
+  }
+  async voiceEpoch(guildId: string) { return this.repository.getModuleEpoch?.(guildId, 'analytics') ?? 0; }
+  onChange(listener: (guildId: string, key: string) => void): () => void {
+    this.changeListeners.add(listener);
+    return () => { this.changeListeners.delete(listener); };
   }
   async setEnabled(guildId: string, key: string, enabled: boolean, actorId: string) {
     const definition = this.definitions.get(key);
@@ -39,6 +46,7 @@ export class ModuleService {
       }
     }
     await this.repository.setModuleState(guildId, key, enabled, actorId);
+    for (const listener of this.changeListeners) listener(guildId, key);
   }
   listAvailable() { return [...this.definitions.values()].filter(definition => !definition.internal && definition.key !== 'core'); }
   async list(guildId: string) {

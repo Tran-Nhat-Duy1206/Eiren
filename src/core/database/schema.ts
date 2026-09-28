@@ -28,6 +28,10 @@ export const guildModules = pgTable('guild_modules', {
   enabled: boolean('enabled').notNull(),
   updatedBy: text('updated_by').notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  // Monotonic epoch separates rapid disable/re-enable transitions even within one millisecond.
+  version: integer('version').notNull().default(0),
+  // The analytics row serializes gateway observations and pre-snapshot boundaries.
+  voiceSequence: bigint('voice_sequence', { mode: 'number' }).notNull().default(0),
 }, table => [primaryKey({ columns: [table.guildId, table.moduleKey] })]);
 
 export const guildPermissionRoles = pgTable('guild_permission_roles', {
@@ -53,6 +57,7 @@ export const moderationCases = pgTable('moderation_cases', {
   metadata: jsonb('metadata').$type<Record<string, string | number | boolean | null>>().notNull().default({}),
 }, table => [
   index('moderation_cases_guild_target_created_idx').on(table.guildId, table.targetId, table.createdAt),
+  index('moderation_cases_guild_created_v6_idx').on(table.guildId, table.createdAt),
   index('moderation_cases_due_idx').on(table.status, table.expiresAt),
   check('moderation_cases_action_check', sql`${table.action} IN ('WARN','TIMEOUT','KICK','BAN','TEMPBAN','UNBAN','PURGE')`),
   check('moderation_cases_status_check', sql`${table.status} IN ('PENDING','ACTIVE','COMPLETED','PROCESSING','EXPIRED','SUPERSEDED','FAILED')`),
@@ -215,6 +220,8 @@ export const tickets = pgTable('tickets', {
   transcriptGeneratedAt: timestamp('transcript_generated_at', { withTimezone: true }),
 }, table => [
   index('tickets_guild_creator_status_idx').on(table.guildId, table.creatorId, table.status),
+  index('tickets_guild_created_v6_idx').on(table.guildId, table.createdAt),
+  index('tickets_guild_closed_v6_idx').on(table.guildId, table.closedAt),
   uniqueIndex('tickets_guild_channel_unique').on(table.guildId, table.channelId),
   check('tickets_type_check', sql`${table.type} IN ('SUPPORT','REPORT','APPEAL','PARTNERSHIP','BUG_REPORT','OTHER')`),
   check('tickets_status_check', sql`${table.status} IN ('OPEN','CLAIMED','CLOSED')`),
@@ -285,6 +292,7 @@ export const suggestions = pgTable('suggestions', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [
   index('suggestions_guild_status_created_idx').on(table.guildId, table.status, table.createdAt),
+  index('suggestions_guild_created_v6_idx').on(table.guildId, table.createdAt),
   uniqueIndex('suggestions_guild_message_unique').on(table.guildId, table.messageId),
   check('suggestions_status_check', sql`${table.status} IN ('PENDING','UNDER_REVIEW','ACCEPTED','REJECTED','IMPLEMENTED')`),
 ]);
@@ -437,6 +445,7 @@ export const communityEvents = pgTable('community_events', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [
   index('community_events_guild_start_idx').on(table.guildId, table.startAt),
+  index('community_events_guild_created_v6_idx').on(table.guildId, table.createdAt),
   index('community_events_due_idx').on(table.status, table.startAt, table.endAt),
   index('community_events_presentation_due_idx').on(table.presentationPending, table.presentationRetryAt),
   check('community_events_status_check', sql`${table.status} IN ('SCHEDULED','ACTIVE','COMPLETED','CANCELLED')`),
@@ -497,6 +506,7 @@ export const giveaways = pgTable('giveaways', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [
   index('giveaways_guild_status_idx').on(table.guildId, table.status),
+  index('giveaways_guild_created_v6_idx').on(table.guildId, table.createdAt),
   index('giveaways_due_idx').on(table.status, table.endAt),
   check('giveaways_prize_check', sql`length(trim(${table.prize})) BETWEEN 1 AND 256`),
   check('giveaways_time_check', sql`${table.endAt} > ${table.startAt}`),
@@ -578,4 +588,101 @@ export const memberAchievements = pgTable('member_achievements', {
 }, table => [
   primaryKey({ columns: [table.guildId, table.userId, table.achievementId] }),
   index('member_achievements_member_awarded_idx').on(table.guildId, table.userId, table.awardedAt),
+  index('member_achievements_guild_awarded_v6_idx').on(table.guildId, table.awardedAt),
 ]);
+
+// V6 analytics stores short-lived idempotency state and UTC-hour aggregates, never content.
+export const analyticsSettings = pgTable('analytics_settings', {
+  guildId: text('guild_id').primaryKey().references(() => guilds.id, { onDelete: 'cascade' }),
+  retentionDays: integer('retention_days').notNull().default(180),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [check('analytics_settings_retention_check', sql`${table.retentionDays} BETWEEN 30 AND 730`)]);
+
+export const analyticsGuildHourly = pgTable('analytics_guild_hourly', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  bucketStart: timestamp('bucket_start', { withTimezone: true }).notNull(),
+  messages: bigint('messages', { mode: 'number' }).notNull().default(0),
+  joins: bigint('joins', { mode: 'number' }).notNull().default(0),
+  leaves: bigint('leaves', { mode: 'number' }).notNull().default(0),
+  voiceSeconds: bigint('voice_seconds', { mode: 'number' }).notNull().default(0),
+}, table => [primaryKey({ columns: [table.guildId, table.bucketStart] }),
+  index('analytics_guild_hourly_bucket_idx').on(table.bucketStart),
+  check('analytics_guild_hourly_nonnegative_check', sql`${table.messages} >= 0 AND ${table.joins} >= 0 AND ${table.leaves} >= 0 AND ${table.voiceSeconds} >= 0`)]);
+
+export const analyticsChannelHourly = pgTable('analytics_channel_hourly', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  channelId: text('channel_id').notNull(),
+  bucketStart: timestamp('bucket_start', { withTimezone: true }).notNull(),
+  messages: bigint('messages', { mode: 'number' }).notNull().default(0),
+  voiceSeconds: bigint('voice_seconds', { mode: 'number' }).notNull().default(0),
+}, table => [primaryKey({ columns: [table.guildId, table.channelId, table.bucketStart] }),
+  index('analytics_channel_hourly_bucket_idx').on(table.bucketStart),
+  check('analytics_channel_hourly_nonnegative_check', sql`${table.messages} >= 0 AND ${table.voiceSeconds} >= 0`)]);
+
+export const analyticsCommandHourly = pgTable('analytics_command_hourly', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  commandName: text('command_name').notNull(),
+  bucketStart: timestamp('bucket_start', { withTimezone: true }).notNull(),
+  invocations: bigint('invocations', { mode: 'number' }).notNull().default(0),
+  errors: bigint('errors', { mode: 'number' }).notNull().default(0),
+  totalDurationMs: bigint('total_duration_ms', { mode: 'number' }).notNull().default(0),
+}, table => [primaryKey({ columns: [table.guildId, table.commandName, table.bucketStart] }),
+  index('analytics_command_hourly_bucket_idx').on(table.bucketStart),
+  check('analytics_command_hourly_nonnegative_check', sql`${table.invocations} >= 0 AND ${table.errors} >= 0 AND ${table.totalDurationMs} >= 0`)]);
+
+export const analyticsEventDedupe = pgTable('analytics_event_dedupe', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  eventKey: text('event_key').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [primaryKey({ columns: [table.guildId, table.eventKey] }),
+  index('analytics_event_dedupe_created_idx').on(table.createdAt),
+  check('analytics_event_dedupe_key_check', sql`length(${table.eventKey}) BETWEEN 1 AND 100`)]);
+
+export const analyticsMemberState = pgTable('analytics_member_state', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  present: boolean('present').notNull(),
+  lastChangedAt: timestamp('last_changed_at', { withTimezone: true }).notNull(),
+}, table => [primaryKey({ columns: [table.guildId, table.userId] }),
+  index('analytics_member_state_changed_idx').on(table.lastChangedAt)]);
+
+export const analyticsActiveVoiceSessions = pgTable('analytics_active_voice_sessions', {
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  // Null is a bounded disconnect tombstone: stale snapshots must not resurrect a newer leave.
+  channelId: text('channel_id'),
+  joinedAt: timestamp('joined_at', { withTimezone: true }).notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+  observationSeq: bigint('observation_seq', { mode: 'number' }).notNull().default(0),
+  observationEpoch: integer('observation_epoch').notNull().default(0),
+  // Pending ingress prevents credit immediately; classification/finalization happens later.
+  pending: boolean('pending').notNull().default(false),
+}, table => [primaryKey({ columns: [table.guildId, table.userId] }),
+  index('analytics_active_voice_updated_idx').on(table.updatedAt)]);
+
+// Dashboard sessions contain only hashes of opaque browser tokens, never OAuth credentials.
+export const dashboardSessions = pgTable('dashboard_sessions', {
+  tokenHash: text('token_hash').primaryKey(),
+  userId: text('user_id').notNull(),
+  oauthGuildIds: jsonb('oauth_guild_ids').$type<string[]>().notNull().default([]),
+  displayName: text('display_name'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  absoluteExpiresAt: timestamp('absolute_expires_at', { withTimezone: true }).notNull(),
+}, table => [index('dashboard_sessions_expiry_idx').on(table.expiresAt),
+  index('dashboard_sessions_absolute_idx').on(table.absoluteExpiresAt),
+  check('dashboard_sessions_expiry_check', sql`${table.expiresAt} <= ${table.absoluteExpiresAt}`)]);
+
+export const dashboardAuditLog = pgTable('dashboard_audit_log', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  actorUserId: text('actor_user_id').notNull(),
+  action: text('action').notNull(),
+  targetType: text('target_type').notNull(),
+  targetId: text('target_id'),
+  success: boolean('success').notNull(),
+  requestId: text('request_id').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, table => [index('dashboard_audit_guild_created_idx').on(table.guildId, table.createdAt),
+  check('dashboard_audit_action_check', sql`length(${table.action}) BETWEEN 1 AND 80`)]);
