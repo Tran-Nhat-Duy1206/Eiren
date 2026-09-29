@@ -8,6 +8,8 @@ export type AiModelCapability = {
   outputUsdPerMillionTokens: number;
   maxInputTokens: number;
   maxOutputTokens: number;
+  /** Operator-approved upper bound for adapter serialization/chat framing; a future adapter must prove it bounds its entire envelope locally, without provider traffic. */
+  requestOverheadTokens: number;
 };
 
 /** Trusted, server-only configuration. Never send endpoint or credentials to a client. */

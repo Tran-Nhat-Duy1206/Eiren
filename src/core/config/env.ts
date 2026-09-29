@@ -54,6 +54,7 @@ const catalogSchema = z.array(z.object({
   outputUsdPerMillionTokens: z.number().finite().positive().max(1000),
   maxInputTokens: positive(AI_DEFAULT_LIMITS.maxEstimatedInputTokens),
   maxOutputTokens: positive(AI_DEFAULT_LIMITS.maxOutputTokens),
+  requestOverheadTokens: z.number().int().min(0).max(512),
 }).strict()).min(1);
 
 export type Env = z.infer<typeof schema> & { DASHBOARD: DashboardEnv | null; AI: AiServerConfig | null };

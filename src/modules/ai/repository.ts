@@ -7,7 +7,7 @@ import { AI_DEFAULT_LIMITS, type AiAdmissionPolicy } from './limits.js';
 
 export type AiIngressToken = Readonly<{ guildId: string; epoch: number }>;
 export type AiAdmission = Readonly<{ id: string; guildId: string; userId: string; epoch: number;
-  modelId: string; reservedCostMicros: number; leaseUntil: Date }>;
+  modelId: string; reservedInputTokens: number; reservedCostMicros: number; leaseUntil: Date }>;
 export type AiAdmissionInput = Readonly<{ ingress: AiIngressToken; userId: string; requestKey: string;
   inputCharacters: number; estimatedInputTokens: number; maxOutputTokens: number;
   model: AiModelCapability; policy: AiAdmissionPolicy; globalDailyBudgetMicros: number;
@@ -50,6 +50,7 @@ export class AiRepository {
     const { ingress, userId, requestKey, model, policy } = input;
     if (!/^\d{17,20}$/.test(userId) || !/^[A-Za-z0-9:_-]{1,128}$/.test(requestKey) ||
       model.providerId !== policy.providerId || model.modelId !== policy.modelId ||
+      !ceiling(model.requestOverheadTokens, AI_DEFAULT_LIMITS.maxRequestOverheadTokens) ||
       (input.now !== undefined && !Number.isFinite(input.now.getTime())) ||
       !ceiling(input.inputCharacters, AI_DEFAULT_LIMITS.maxInputCharacters) ||
       !ceiling(input.estimatedInputTokens, Math.min(AI_DEFAULT_LIMITS.maxEstimatedInputTokens, policy.maxEstimatedInputTokens, model.maxInputTokens)) ||
@@ -139,7 +140,7 @@ export class AiRepository {
         reservedCostMicros: sql`${aiUsageDaily.reservedCostMicros} + ${cost}` })
         .where(and(eq(aiUsageDaily.guildId, ingress.guildId), eq(aiUsageDaily.utcDay, day)));
       return Object.freeze({ id, guildId: ingress.guildId, userId, epoch: ingress.epoch,
-        modelId: model.modelId, reservedCostMicros: cost, leaseUntil });
+        modelId: model.modelId, reservedInputTokens: input.estimatedInputTokens, reservedCostMicros: cost, leaseUntil });
     });
   }
 

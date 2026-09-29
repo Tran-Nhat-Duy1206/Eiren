@@ -4,11 +4,12 @@ import type { AiServerConfig } from './contracts.js';
 import { AI_DEFAULT_LIMITS } from './limits.js';
 import { AiRepository, maximumCostMicros } from './repository.js';
 import { AiService } from './service.js';
+import { prepareAiRequest } from './prepared-request.js';
 
 const guildId = '12345678901234567', userId = '22345678901234567';
 const actor: Actor = { guildId, userId, guildOwnerId: userId, roleIds: [] };
 const model = { providerId: 'approved', modelId: 'small', inputUsdPerMillionTokens: 2,
-  outputUsdPerMillionTokens: 4, maxInputTokens: 2048, maxOutputTokens: 512 };
+  outputUsdPerMillionTokens: 4, maxInputTokens: 2048, maxOutputTokens: 512, requestOverheadTokens: 32 };
 const server: AiServerConfig = { providerId: 'approved', endpoint: 'https://provider.example/ai', apiKey: 'secret-not-logged',
   models: [model], timeoutMs: AI_DEFAULT_LIMITS.timeoutMs, globalDailyBudgetMicros: 5_000_000,
   globalMonthlyBudgetMicros: 50_000_000,
@@ -16,8 +17,9 @@ const server: AiServerConfig = { providerId: 'approved', endpoint: 'https://prov
     maxEstimatedInputTokens: 2048, maxOutputTokens: 512, guildRequestsPerDay: 25,
     userRequestsPerDay: 10, userCooldownSeconds: 30, guildConcurrency: 1,
     processConcurrency: 4, monthlyBudgetUsd: 5 } };
-const metadata = { userId, requestKey: 'interaction-1', inputText: 'private prompt never persisted',
-  estimatedInputTokens: 100, maxOutputTokens: 128, now: new Date('2000-01-01T00:00:00.000Z') };
+const prepared = prepareAiRequest({ modelId: 'small', instructions: 'Trusted server policy',
+  userInput: 'private prompt never persisted', maxOutputTokens: 128 }, model)!;
+const metadata = { userId, requestKey: 'interaction-1', prepared };
 const permission = { require: vi.fn(async () => {}) } as unknown as PermissionService;
 
 describe('V7.1 metadata-only AI admission boundary', () => {
@@ -37,9 +39,11 @@ describe('V7.1 metadata-only AI admission boundary', () => {
     expect(token).toEqual({ guildId, epoch: 4 });
     expect(await service.admit(token, actor, metadata)).toBeNull();
     expect(admit).toHaveBeenCalledWith(expect.objectContaining({ ingress: token, userId,
-      inputCharacters: metadata.inputText.length, estimatedInputTokens: 100, model }));
+      inputCharacters: metadata.prepared.userInput.length,
+      estimatedInputTokens: metadata.prepared.estimatedBillableInputTokens, model }));
     const persistedInput = JSON.stringify(admit.mock.calls);
-    expect(persistedInput).not.toContain(metadata.inputText);
+    expect(persistedInput).not.toContain(metadata.prepared.userInput);
+    expect(persistedInput).not.toContain(metadata.prepared.instructions);
     expect(persistedInput).not.toContain(server.apiKey);
     expect(persistedInput).not.toContain('"now"');
     expect(permission.require).toHaveBeenCalledWith(actor, 'MEMBER');
@@ -50,9 +54,11 @@ describe('V7.1 metadata-only AI admission boundary', () => {
     const ingress = { guildId, epoch: 4 };
     await expect(service.admit(ingress, { ...actor, guildId: '32345678901234567' }, metadata))
       .rejects.toMatchObject({ code: 'PERMISSION' });
-    await expect(service.admit(ingress, actor, { ...metadata, inputText: 'x'.repeat(4001) }))
+    await expect(service.admit(ingress, actor, { ...metadata,
+      prepared: { ...prepared, userInput: 'x'.repeat(4001) } }))
       .rejects.toMatchObject({ code: 'VALIDATION' });
-    await expect(service.admit(ingress, actor, { ...metadata, estimatedInputTokens: 2049 }))
+    await expect(service.admit(ingress, actor, { ...metadata,
+      prepared: { ...prepared, estimatedBillableInputTokens: 1 } }))
       .rejects.toMatchObject({ code: 'VALIDATION' });
     expect(admit).not.toHaveBeenCalled();
   });
@@ -74,7 +80,7 @@ describe('V7.1 metadata-only AI admission boundary', () => {
   it('does not invent actual usage when a provider result is absent', async () => {
     const settle = vi.fn(async () => false);
     const service = new AiService({ settle } as unknown as AiRepository, permission, server);
-    const admission = { id: '123', guildId, userId, epoch: 4, modelId: 'small', reservedCostMicros: 712,
+    const admission = { id: '123', guildId, userId, epoch: 4, modelId: 'small', reservedInputTokens: 100, reservedCostMicros: 712,
       leaseUntil: new Date() };
     expect(await service.settle(admission, null)).toBe(false);
     expect(settle).toHaveBeenCalledWith(admission, null, undefined);

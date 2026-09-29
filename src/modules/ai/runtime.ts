@@ -1,6 +1,7 @@
 import type { Actor } from '../../core/permissions/permission-service.js';
 import type { AiProvider, AiResponse, AiUsage } from './contracts.js';
 import { AI_DEFAULT_LIMITS } from './limits.js';
+import { prepareAiRequest } from './prepared-request.js';
 import type { AiIngressToken } from './repository.js';
 import type { AiService } from './service.js';
 
@@ -9,7 +10,7 @@ export type AiRuntimeResult = Readonly<{ kind: 'ok'; text: string } | {
   kind: 'disabled' | 'unavailable' | 'too_large' | 'limited' | 'timeout' | 'failed';
 }>;
 export type AiRuntimeInput = Readonly<{ ingress: AiIngressToken | null; actor: Actor; requestKey: string;
-  mode: AiMode; text: string }>;
+  mode: AiMode; text: string; context?: string }>;
 
 const MAX_DISPLAY_CHARACTERS = 1800;
 const INSTRUCTIONS: Readonly<Record<AiMode, string>> = {
@@ -32,7 +33,11 @@ export class AiRuntime {
   status() {
     const config = this.admission.runtimeConfig();
     return { providerAvailable: Boolean(config && this.provider?.capabilities.some(capability =>
-      capability.providerId === config.providerId && capability.modelId === config.modelId)), config };
+      capability.providerId === config.providerId && capability.modelId === config.modelId &&
+      Number.isSafeInteger(capability.requestOverheadTokens) && capability.requestOverheadTokens >= 0 &&
+      capability.requestOverheadTokens <= config.model.requestOverheadTokens &&
+      capability.maxInputTokens >= config.model.maxInputTokens &&
+      capability.maxOutputTokens >= config.model.maxOutputTokens)), config };
   }
 
   run(input: AiRuntimeInput): Promise<AiRuntimeResult> {
@@ -54,19 +59,21 @@ export class AiRuntime {
     const config = this.admission.runtimeConfig();
     if (!config || !this.provider || !this.status().providerAvailable) return { kind: 'unavailable' };
     if (!input.ingress) return { kind: 'disabled' };
-    if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > AI_DEFAULT_LIMITS.maxInputCharacters)
-      return { kind: 'too_large' };
-    // An upper bound for byte-based token vocabularies, not a tokenizer: no silent truncation.
-    const estimatedInputTokens = Buffer.byteLength(input.text, 'utf8');
-    if (estimatedInputTokens < 1 || estimatedInputTokens > AI_DEFAULT_LIMITS.maxEstimatedInputTokens)
-      return { kind: 'too_large' };
-    const maxOutputTokens = Math.min(AI_DEFAULT_LIMITS.maxOutputTokens, config.maxOutputTokens);
+    const prepared = prepareAiRequest({ modelId: config.modelId, instructions: INSTRUCTIONS[input.mode],
+      userInput: input.text, ...(input.context === undefined ? {} : { context: input.context }),
+      maxOutputTokens: Math.min(AI_DEFAULT_LIMITS.maxOutputTokens, config.maxOutputTokens) }, config.model);
+    if (!prepared) return { kind: 'too_large' };
     let admission;
     try {
       admission = await this.admission.admit(input.ingress, input.actor, { userId: input.actor.userId,
-        requestKey: input.requestKey, inputText: input.text, estimatedInputTokens, maxOutputTokens });
+        requestKey: input.requestKey, prepared });
     } catch { return { kind: 'failed' }; }
     if (!admission) return { kind: 'limited' };
+    // Repository persistence and dispatch must agree on exactly the same total input bound.
+    if (admission.reservedInputTokens !== prepared.estimatedBillableInputTokens) {
+      try { await this.admission.settle(admission, null); } catch { /* Lease recovery charges the reservation. */ }
+      return { kind: 'failed' };
+    }
 
     const timeoutMs = Math.min(AI_DEFAULT_LIMITS.timeoutMs, config.timeoutMs);
     let timedOut = false;
@@ -78,10 +85,10 @@ export class AiRuntime {
     let response: AiResponse | null = null;
     try {
       if (controller.signal.aborted) throw new Error('AI aborted');
-      // The provider sees trusted policy and explicit untrusted user input in separate fields.
+      // The exact prepared fields admitted above are dispatched; the estimate stays local.
+      const { estimatedBillableInputTokens: _estimate, ...content } = prepared;
       response = await Promise.race([Promise.resolve().then(() => this.provider!.generate({
-        modelId: config.modelId, instructions: INSTRUCTIONS[input.mode], userInput: input.text,
-        maxOutputTokens, timeoutMs, signal: controller.signal,
+        ...content, timeoutMs, signal: controller.signal,
       })), abort]);
     } catch { /* Provider errors and ambiguous dispatch are charged conservatively, never logged. */ }
     finally { clearTimeout(timeout); }
@@ -92,7 +99,8 @@ export class AiRuntime {
       typeof response.text === 'string' && response.text.trim().length > 0 &&
       response.text.length + suffix.length <= MAX_DISPLAY_CHARACTERS && usageValid(response.usage) &&
       response.usage.inputTokens > 0 && response.usage.outputTokens > 0 &&
-      response.usage.inputTokens <= estimatedInputTokens && response.usage.outputTokens <= maxOutputTokens;
+      response.usage.inputTokens <= admission.reservedInputTokens &&
+      response.usage.outputTokens <= prepared.maxOutputTokens;
     let authorized = false;
     try {
       authorized = await this.admission.settle(admission, valid ? response!.usage : null);

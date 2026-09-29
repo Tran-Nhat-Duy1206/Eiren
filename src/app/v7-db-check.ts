@@ -14,7 +14,7 @@ const id = randomUUID();
 const guildId = `v7-check-${id}`, otherId = `v7-check-other-${id}`;
 const userId = '12345678901234567', otherUser = '22345678901234567';
 const model = { providerId: 'synthetic', modelId: 'approved', inputUsdPerMillionTokens: 2,
-  outputUsdPerMillionTokens: 4, maxInputTokens: 2048, maxOutputTokens: 512 };
+  outputUsdPerMillionTokens: 4, maxInputTokens: 2048, maxOutputTokens: 512, requestOverheadTokens: 32 };
 const policy = { providerId: 'synthetic', modelId: 'approved', ...AI_DEFAULT_LIMITS };
 const now = new Date();
 let stage = 'initialize';

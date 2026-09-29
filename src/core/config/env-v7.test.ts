@@ -8,7 +8,7 @@ const enabled = () => {
   base(); Object.assign(process.env, { AI_ENABLED: 'true', AI_PROVIDER_ID: 'operator-provider', AI_MODEL_ID: 'approved',
     AI_ENDPOINT: 'https://example.org/v1', AI_API_KEY: 'synthetic-secret',
     AI_MODEL_CATALOG: JSON.stringify([{ providerId: 'operator-provider', modelId: 'approved',
-      inputUsdPerMillionTokens: 1, outputUsdPerMillionTokens: 2, maxInputTokens: 2048, maxOutputTokens: 512 }]) });
+      inputUsdPerMillionTokens: 1, outputUsdPerMillionTokens: 2, maxInputTokens: 2048, maxOutputTokens: 512, requestOverheadTokens: 32 }]) });
 };
 
 describe('V7 optional server AI configuration', () => {
@@ -31,6 +31,24 @@ describe('V7 optional server AI configuration', () => {
     expect(ai.globalDailyBudgetMicros).toBe(5_000_000);
     expect(ai.globalMonthlyBudgetMicros).toBe(50_000_000);
     expect(ai.models[0]?.outputUsdPerMillionTokens).toBe(2);
+    expect(ai.models[0]?.requestOverheadTokens).toBe(32);
+  });
+  it('requires explicitly approved bounded integer request overhead per catalog model', () => {
+    for (const overhead of [undefined, -1, 0.5, 513]) {
+      enabled();
+      const [model] = JSON.parse(process.env.AI_MODEL_CATALOG!) as Record<string, unknown>[];
+      if (overhead === undefined) delete model!.requestOverheadTokens;
+      else model!.requestOverheadTokens = overhead;
+      process.env.AI_MODEL_CATALOG = JSON.stringify([model]);
+      expect(() => loadEnv()).toThrow(/AI_MODEL_CATALOG/);
+    }
+    for (const overhead of [0, 512]) {
+      enabled();
+      const [model] = JSON.parse(process.env.AI_MODEL_CATALOG!) as Record<string, unknown>[];
+      model!.requestOverheadTokens = overhead;
+      process.env.AI_MODEL_CATALOG = JSON.stringify([model]);
+      expect(loadEnv().AI?.models[0]?.requestOverheadTokens).toBe(overhead);
+    }
   });
   it('rejects unapproved models, invalid pricing, endpoint credentials and oversized caps', () => {
     enabled(); process.env.AI_MODEL_ID = 'unapproved'; expect(() => loadEnv()).toThrow(/AI_MODEL_ID/);

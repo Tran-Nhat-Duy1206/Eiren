@@ -57,7 +57,7 @@ try {
   await waiting;
   const pruning = pruneAiMetadata(db, at);
   const settling = new AiRepository(db).settle({ id: liveId, guildId, userId: '12345678901234567', epoch: 0,
-    modelId: 'synthetic', reservedCostMicros: 10, leaseUntil: new Date('2026-01-01T00:00:00Z') },
+    modelId: 'synthetic', reservedInputTokens: 1, reservedCostMicros: 10, leaseUntil: new Date('2026-01-01T00:00:00Z') },
   { inputTokens: 0, outputTokens: 0, costMicros: 4 }, at);
   unlock();
   await held;
@@ -80,7 +80,7 @@ try {
   await expiredHeldReady;
   const expiredPrune = pruneAiMetadata(db, at);
   const expiredSettle = new AiRepository(db).settle({ id: expiredRaceId, guildId,
-    userId: '12345678901234567', epoch: 0, modelId: 'synthetic', reservedCostMicros: 10,
+    userId: '12345678901234567', epoch: 0, modelId: 'synthetic', reservedInputTokens: 1, reservedCostMicros: 10,
     leaseUntil: new Date('2023-01-02T00:00:00Z') }, { inputTokens: 0, outputTokens: 0, costMicros: 4 }, at);
   releaseExpired();
   await expiredHeld;
