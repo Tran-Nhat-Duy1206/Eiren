@@ -2,8 +2,10 @@ export const AUTOMATION_STATUSES = ['PENDING', 'RUNNING', 'SUCCEEDED', 'SKIPPED'
 export type AutomationStatus = typeof AUTOMATION_STATUSES[number];
 /** UNCERTAIN is terminal: never blindly retry an ambiguous Discord side effect. */
 const transitions: Readonly<Record<AutomationStatus, readonly AutomationStatus[]>> = {
-  PENDING: ['RUNNING', 'SKIPPED'], RUNNING: ['SUCCEEDED', 'SKIPPED', 'FAILED', 'UNCERTAIN'],
-  SUCCEEDED: [], SKIPPED: [], FAILED: [], UNCERTAIN: [],
+  PENDING: ['RUNNING', 'SKIPPED'],
+  // RUNNING -> PENDING is permitted ONLY by bounded recovery/defer with proof no action-run started.
+  RUNNING: ['PENDING', 'SUCCEEDED', 'SKIPPED', 'FAILED', 'UNCERTAIN'],
+  SUCCEEDED: [], SKIPPED: [], FAILED: ['PENDING'], UNCERTAIN: [],
 };
 export function canTransitionAutomationStatus(from: AutomationStatus, to: AutomationStatus): boolean {
   return Object.hasOwn(transitions, from) && transitions[from].includes(to);

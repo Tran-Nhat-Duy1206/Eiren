@@ -1,5 +1,5 @@
 import type { PermissionLevel } from '../../core/permissions/permission-service.js';
-import type { ZodType } from 'zod';
+import { z, type ZodType } from 'zod';
 
 /** Contract only: no registered item implies an executable automation. */
 export const AUTOMATION_SCHEMA_VERSION = 1;
@@ -29,8 +29,29 @@ export type AutomationExecutionContext = Readonly<{
   guildId: string; automationId: string; executionId: string; depth: number;
   triggerId: string; triggerVersion: number; createdAt: Date;
 }>;
-export const AUTOMATION_TRIGGERS: readonly AutomationTriggerDefinition[] = Object.freeze([]);
-export const AUTOMATION_ACTIONS: readonly AutomationActionDefinition[] = Object.freeze([]);
+const snowflake = z.string().regex(/^[0-9]{1,20}$/).refine(value => BigInt(value) > 0n && BigInt(value) <= 18446744073709551615n);
+const message = z.string().min(1).max(AUTOMATION_LIMITS.maxStaticMessageLength);
+const capability = (runtimePrerequisites: readonly AutomationRuntimePrerequisite[], discordSideEffect: AutomationDiscordSideEffect): AutomationCapability =>
+  Object.freeze({ configurePermission: AUTOMATION_CONFIGURE_PERMISSION, runtimePrerequisites: Object.freeze([...runtimePrerequisites]), discordSideEffect });
+export const AUTOMATION_TRIGGERS: readonly AutomationTriggerDefinition[] = Object.freeze([Object.freeze({
+  id: 'SCHEDULED', version: 1, schemaVersion: AUTOMATION_SCHEMA_VERSION, runnable: false, timeoutMs: 1000,
+  idempotency: 'IDEMPOTENT', capability: capability([], 'NONE'),
+  configSchema: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('daily'), time: z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9]$/), timezone: z.string().min(1).max(100).refine(value => { try { new Intl.DateTimeFormat('en-US', { timeZone: value }); return true; } catch { return false; } }) }).strict(),
+    z.object({ kind: z.literal('once'), at: z.string().datetime({ offset: false }).regex(/Z$/).refine(value => {
+      const date = new Date(value);
+      return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value.slice(0, 10);
+    }) }).strict(),
+  ]),
+})]);
+export const AUTOMATION_ACTIONS: readonly AutomationActionDefinition[] = Object.freeze([
+  Object.freeze({ id: 'STATIC_MESSAGE', version: 1, schemaVersion: AUTOMATION_SCHEMA_VERSION, runnable: false, timeoutMs: 1000,
+    idempotency: 'DEDUPLICATED', capability: capability(['GUILD_AVAILABLE', 'CHANNEL_AVAILABLE', 'BOT_SEND_MESSAGES'], 'SEND_MESSAGE'),
+    configSchema: z.object({ channelId: snowflake, message }).strict(), maxStaticMessageLength: AUTOMATION_LIMITS.maxStaticMessageLength }),
+  Object.freeze({ id: 'STAFF_LOG', version: 1, schemaVersion: AUTOMATION_SCHEMA_VERSION, runnable: false, timeoutMs: 1000,
+    idempotency: 'DEDUPLICATED', capability: capability(['GUILD_AVAILABLE', 'CHANNEL_AVAILABLE', 'BOT_SEND_MESSAGES'], 'SEND_MESSAGE'),
+    configSchema: z.object({ channelId: snowflake, message }).strict(), maxStaticMessageLength: AUTOMATION_LIMITS.maxStaticMessageLength }),
+]);
 
 // Registry identifiers match the fixed, non-executable keys permitted by the V7.1 SQL checks.
 const idPattern = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/;

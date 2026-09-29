@@ -3,7 +3,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { loadEnv } from '../core/config/env.js';
 import { createDatabase } from '../core/database/connection.js';
 import { guilds, guildModules, aiSettings, aiUsageDaily, aiRequests,
-  automations, automationActions, automationExecutions, automationActionRuns } from '../core/database/schema.js';
+  automations, automationActions, automationExecutions, automationExecutionActions, automationActionRuns } from '../core/database/schema.js';
 import { GuildRepository } from '../repositories/guild-repository.js';
 import { AiRepository, maximumCostMicros, type AiAdmissionInput } from '../modules/ai/repository.js';
 import { AI_DEFAULT_LIMITS } from '../modules/ai/limits.js';
@@ -276,6 +276,8 @@ try {
     .set({ status: 'EXECUTING' }).where(eq(automationExecutions.id, executionId))));
   assert('automationRejectsUnsafeDepth', await rejection(() => db.update(automationExecutions)
     .set({ chainDepth: 3 }).where(eq(automationExecutions.id, executionId))));
+  await db.insert(automationExecutionActions).values({ executionId, position: 0,
+    actionKey: 'STATIC_MESSAGE', actionVersion: 1, config: { text: 'synthetic' } });
   await db.insert(automationActionRuns).values({ executionId, position: 0 });
   assert('executionActionRunLinked', (await db.select().from(automationActionRuns)
     .where(eq(automationActionRuns.executionId, executionId))).length === 1);

@@ -15,7 +15,10 @@ const config = () => ({ schemaVersion: 1, enabled: true, trigger: { id: trigger.
 const validate = (input: unknown, count = 0) => validateAutomationConfig(input, [trigger], [action], count);
 describe('automation contract only', () => {
   it('starts with no runnable registrations and fixed safety ceilings', () => {
-    expect(AUTOMATION_TRIGGERS).toEqual([]); expect(AUTOMATION_ACTIONS).toEqual([]);
+    expect(AUTOMATION_TRIGGERS.map(item => item.id)).toEqual(['SCHEDULED']);
+    expect(AUTOMATION_ACTIONS.map(item => item.id)).toEqual(['STATIC_MESSAGE', 'STAFF_LOG']);
+    expect([...AUTOMATION_TRIGGERS, ...AUTOMATION_ACTIONS].every(item => item.runnable === false)).toBe(true);
+    expect(() => validateAutomationRegistry(AUTOMATION_TRIGGERS, AUTOMATION_ACTIONS)).not.toThrow();
     expect(AUTOMATION_CONFIGURE_PERMISSION).toBe('ADMIN');
     expect(AUTOMATION_LIMITS).toMatchObject({ maxEnabled: 20, maxActions: 2, maxDepth: 2, maxStaticMessageLength: 1000,
       futureClaimsPerTick: 20, futureClaimsPerGuild: 2, executionsPerMinute: 10, executionsPerHour: 60, retryAttempts: 5 });
@@ -47,8 +50,11 @@ describe('automation contract only', () => {
     expect(AUTOMATION_STATUSES).toHaveLength(6);
     expect(canTransitionAutomationStatus('PENDING', 'RUNNING')).toBe(true);
     expect(canTransitionAutomationStatus('RUNNING', 'UNCERTAIN')).toBe(true);
+    expect(canTransitionAutomationStatus('RUNNING', 'PENDING')).toBe(true); // only safe no-effect recovery/defer
     for (const terminal of ['SUCCEEDED', 'SKIPPED', 'FAILED', 'UNCERTAIN'] as const)
       expect(() => assertAutomationStatusTransition(terminal, 'RUNNING')).toThrow();
+    expect(canTransitionAutomationStatus('FAILED', 'PENDING')).toBe(true);
+    expect(canTransitionAutomationStatus('UNCERTAIN', 'PENDING')).toBe(false);
     expect(canTransitionAutomationStatus('PENDING', 'SUCCEEDED')).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
+import { Client, DiscordAPIError, Events, GatewayIntentBits, Partials } from 'discord.js';
 import { and, eq } from 'drizzle-orm';
 import { loadEnv } from '../core/config/env.js';
 import { createDatabase } from '../core/database/connection.js';
@@ -11,7 +11,8 @@ import { guilds, moderationCases, moderatorNotes, verificationSettings, memberVe
   giveawayEntries, giveawayDraws, giveawayWinners, tempvoiceSettings, tempvoiceRooms, memberAchievements,
   analyticsSettings, analyticsGuildHourly, analyticsChannelHourly, analyticsCommandHourly, analyticsEventDedupe,
   analyticsMemberState, analyticsActiveVoiceSessions, dashboardSessions, dashboardAuditLog,
-  aiSettings, aiUsageDaily, aiRequests, automations, automationActions, automationExecutions, automationActionRuns } from '../core/database/schema.js';
+  aiSettings, aiUsageDaily, aiRequests, automations, automationActions, automationExecutions,
+  automationExecutionActions, automationExecutionAttempts, automationActionRuns } from '../core/database/schema.js';
 import { createLogger } from '../core/logger/logger.js';
 import { registerCommands } from '../core/commands/dispatcher.js';
 import { registerComponents, registerSelects } from '../core/components/component.js';
@@ -69,6 +70,8 @@ import { AiRepository } from '../modules/ai/repository.js';
 import { AiService } from '../modules/ai/service.js';
 import { AiRuntime } from '../modules/ai/runtime.js';
 import { pruneAiMetadata } from '../modules/ai/retention.js';
+import { AutomationRepository } from '../modules/automation/repository.js';
+import { AutomationService } from '../modules/automation/service.js';
 import { observedHumanVoice } from '../modules/analytics/voice-snapshot.js';
 import { DashboardAuth } from '../dashboard/auth/dashboard-auth.js';
 import { DashboardAccess } from '../dashboard/access/dashboard-access.js';
@@ -174,6 +177,16 @@ const ai = new AiService(new AiRepository(db), permissions, env.AI ? {
   globalMonthlyBudgetMicros: env.AI.globalMonthlyBudgetMicros,
 } : null);
 const aiRuntime = new AiRuntime(ai, null); // fail closed until a separately reviewed V7.2B adapter exists
+const automation = new AutomationService(new AutomationRepository(db), permissions, async (guildId, userId) => {
+  const guild = await client.guilds.fetch({ guild: guildId, force: true });
+  try {
+    const member = await guild.members.fetch({ user: userId, force: true }); // Fresh REST membership/roles outside a DB transaction.
+    return { guildId, userId, guildOwnerId: guild.ownerId, roleIds: [...member.roles.cache.keys()] };
+  } catch (error) {
+    if (error instanceof DiscordAPIError && error.code === 10007) return null;
+    throw error;
+  }
+}, logger);
 const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
   baseUrl: env.DASHBOARD.DASHBOARD_BASE_URL, sessionSecret: env.DASHBOARD.DASHBOARD_SESSION_SECRET,
   discordClientId: env.DISCORD_CLIENT_ID, discordClientSecret: env.DASHBOARD.DISCORD_CLIENT_SECRET,
@@ -242,6 +255,7 @@ const v5Scheduler = new V5Scheduler([
   { name: 'giveaways', runDue: async () => { await giveaways.runDue(); } },
   { name: 'tempvoice', runDue: async () => { await tempvoice.runDue(); } },
   { name: 'analytics', runDue: analyticsDue },
+  { name: 'automation', runDue: async () => { await automation.runDue(); } },
   { name: 'ai-maintenance', runDue: async () => {
     const result = await pruneAiMetadata(db);
     logger.debug({ job: 'ai-maintenance', ...result }, 'AI metadata maintenance complete');
@@ -306,6 +320,8 @@ const lifecycle = createBotLifecycle({
     await db.select({ id: automations.id }).from(automations).limit(1);
     await db.select({ id: automationActions.automationId }).from(automationActions).limit(1);
     await db.select({ id: automationExecutions.id }).from(automationExecutions).limit(1);
+    await db.select({ id: automationExecutionActions.executionId }).from(automationExecutionActions).limit(1);
+    await db.select({ id: automationExecutionAttempts.id }).from(automationExecutionAttempts).limit(1);
     await db.select({ id: automationActionRuns.executionId }).from(automationActionRuns).limit(1);
     if (dashboardAuth) {
       await db.select({ id: dashboardSessions.tokenHash }).from(dashboardSessions).limit(1);
