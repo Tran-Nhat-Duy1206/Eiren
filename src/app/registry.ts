@@ -32,6 +32,7 @@ import { tempvoiceEvents } from '../modules/tempvoice/events.js';
 import { achievementsCommands } from '../modules/achievements/commands.js';
 import { analyticsCommands } from '../modules/analytics/commands.js';
 import { analyticsEvents } from '../modules/analytics/events.js';
+import { aiCommands } from '../modules/ai/commands.js';
 
 export interface ModuleManifest {
   definition: ModuleDefinition;
@@ -61,7 +62,7 @@ export const manifests: readonly ModuleManifest[] = [
   { definition: { key: 'tempvoice', defaultEnabled: false }, commands: tempvoiceCommands, events: tempvoiceEvents },
   { definition: { key: 'achievements', defaultEnabled: false }, commands: achievementsCommands, events: [] },
   { definition: { key: 'analytics', defaultEnabled: false }, commands: [], events: analyticsEvents },
-  { definition: { key: 'ai', defaultEnabled: false }, commands: [], events: [] },
+  { definition: { key: 'ai', defaultEnabled: false }, commands: aiCommands, events: [] },
   { definition: { key: 'automation', defaultEnabled: false }, commands: [], events: [] },
 ];
 

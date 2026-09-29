@@ -8,13 +8,13 @@ const repository = () => ({ getModuleState: vi.fn(async (_guild: string, key: st
 const states = new Map<string, boolean>();
 
 describe('V7 independent inactive module manifests', () => {
-  it('has no handlers or dependencies and defaults both off', async () => {
+  it('keeps both modules independent and off; only AI exposes explicit slash commands', async () => {
     states.clear();
     const registry = buildRegistry(manifests);
     const service = new ModuleService(repository(), registry.definitions);
     for (const key of ['ai', 'automation']) {
       expect(registry.definitions.find(definition => definition.key === key)).toEqual({ key, defaultEnabled: false });
-      expect(registry.commands.size && [...registry.commands.values()].some(command => command.moduleKey === key)).toBe(false);
+      expect([...registry.commands.values()].some(command => command.moduleKey === key)).toBe(key === 'ai');
       expect(registry.events.some(event => event.moduleKey === key)).toBe(false);
       expect([...registry.components.values(), ...registry.selects.values()].some(component => component.moduleKey === key)).toBe(false);
       expect(await service.isEnabled('guild', key)).toBe(false);

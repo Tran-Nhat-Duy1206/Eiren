@@ -67,6 +67,8 @@ import { AnalyticsMaintenanceError, AnalyticsRepository } from '../modules/analy
 import { AnalyticsService } from '../modules/analytics/service.js';
 import { AiRepository } from '../modules/ai/repository.js';
 import { AiService } from '../modules/ai/service.js';
+import { AiRuntime } from '../modules/ai/runtime.js';
+import { pruneAiMetadata } from '../modules/ai/retention.js';
 import { observedHumanVoice } from '../modules/analytics/voice-snapshot.js';
 import { DashboardAuth } from '../dashboard/auth/dashboard-auth.js';
 import { DashboardAccess } from '../dashboard/access/dashboard-access.js';
@@ -165,12 +167,13 @@ const giveaways = new GiveawayService(new GiveawayRepository(db), permissions, m
 const tempvoice = new TempvoiceService(new TempvoiceRepository(db), permissions, logger,
   async guildId => new DiscordTempvoiceGateway(await client.guilds.fetch(guildId)));
 const analytics = new AnalyticsService(new AnalyticsRepository(db), permissions, modules);
-// V7.1 has no provider gateway, commands, scheduler work, or Discord side effects.
+// V7.2A has explicit AI commands, but no production provider adapter or external inference.
 const ai = new AiService(new AiRepository(db), permissions, env.AI ? {
   providerId: env.AI.providerId, models: env.AI.models, policy: env.AI.policy,
   timeoutMs: env.AI.timeoutMs, globalDailyBudgetMicros: env.AI.globalDailyBudgetMicros,
   globalMonthlyBudgetMicros: env.AI.globalMonthlyBudgetMicros,
 } : null);
+const aiRuntime = new AiRuntime(ai, null); // fail closed until a separately reviewed V7.2B adapter exists
 const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
   baseUrl: env.DASHBOARD.DASHBOARD_BASE_URL, sessionSecret: env.DASHBOARD.DASHBOARD_SESSION_SECRET,
   discordClientId: env.DISCORD_CLIENT_ID, discordClientSecret: env.DASHBOARD.DISCORD_CLIENT_SECRET,
@@ -178,7 +181,7 @@ const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
 });
 let dashboard: Awaited<ReturnType<typeof createDashboardServer>> | undefined;
 const services = { logger, repository, guildConfig, permissions, modules, guildLogs, moderation, verification, antiraid,
-  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements, analytics, ai };
+  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements, analytics, ai, aiRuntime };
 const scheduler = new ModerationScheduler(moderation, async guildId => {
   const guild = await client.guilds.fetch(guildId);
   if (!client.user) throw new Error('Bot not logged in');
@@ -239,6 +242,10 @@ const v5Scheduler = new V5Scheduler([
   { name: 'giveaways', runDue: async () => { await giveaways.runDue(); } },
   { name: 'tempvoice', runDue: async () => { await tempvoice.runDue(); } },
   { name: 'analytics', runDue: analyticsDue },
+  { name: 'ai-maintenance', runDue: async () => {
+    const result = await pruneAiMetadata(db);
+    logger.debug({ job: 'ai-maintenance', ...result }, 'AI metadata maintenance complete');
+  } },
 ], logger);
 let retentionTimer: NodeJS.Timeout | undefined;
 async function pruneHistory() {
@@ -345,6 +352,7 @@ const lifecycle = createBotLifecycle({
     if (retentionTimer) clearInterval(retentionTimer);
     await dashboard?.close();
     await analyticsReconcile;
+    await aiRuntime.stop();
     await scheduler.stop(); await v5Scheduler.stop(); await pool.end();
   },
 });

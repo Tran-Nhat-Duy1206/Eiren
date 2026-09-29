@@ -12,7 +12,20 @@ export type AiAdmissionMetadata = Readonly<{ userId: string; requestKey: string;
 /** Foundation only: no provider is injected, invoked, or imported here. */
 export class AiService {
   constructor(readonly repository: AiRepository, private readonly permissions: PermissionService,
-    private readonly server: AiAdmissionConfig | null) {}
+    private readonly server: AiAdmissionConfig | null) {
+    if (server && server.providerId !== server.policy.providerId)
+      throw new Error('Invalid approved AI provider configuration');
+  }
+
+  /** Server-approved, credential-free runtime metadata. No provider endpoint or key leaves the environment. */
+  runtimeConfig(): Readonly<{ providerId: string; modelId: string; timeoutMs: number; maxOutputTokens: number;
+    guildRequestsPerDay: number; userRequestsPerDay: number; monthlyBudgetUsd: number }> | null {
+    if (!this.server) return null;
+    return { providerId: this.server.policy.providerId, modelId: this.server.policy.modelId,
+      timeoutMs: this.server.timeoutMs, maxOutputTokens: this.server.policy.maxOutputTokens,
+      guildRequestsPerDay: this.server.policy.guildRequestsPerDay, userRequestsPerDay: this.server.policy.userRequestsPerDay,
+      monthlyBudgetUsd: this.server.policy.monthlyBudgetUsd };
+  }
 
   /** Future command handlers must reserve before unrelated async dispatcher work. */
   reserveIngress(guildId: string): Promise<AiIngressToken | null> {

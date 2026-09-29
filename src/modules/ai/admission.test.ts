@@ -67,6 +67,10 @@ describe('V7.1 metadata-only AI admission boundary', () => {
     expect(() => maximumCostMicros(model, Number.MAX_SAFE_INTEGER, 1)).toThrow();
     expect(() => maximumCostMicros({ ...model, outputUsdPerMillionTokens: 1001 }, 1, 1)).toThrow();
   });
+  it('rejects divergent approved provider identity before any admission or billing', () => {
+    expect(() => new AiService({} as AiRepository, permission,
+      { ...server, providerId: 'other-approved-provider' })).toThrow('Invalid approved AI provider configuration');
+  });
   it('does not invent actual usage when a provider result is absent', async () => {
     const settle = vi.fn(async () => false);
     const service = new AiService({ settle } as unknown as AiRepository, permission, server);
