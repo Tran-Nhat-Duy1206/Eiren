@@ -7,7 +7,7 @@ import { AI_DEFAULT_LIMITS } from './limits.js';
 import { AiRepository, maximumCostMicros, type AiAdmission, type AiIngressToken } from './repository.js';
 
 export type AiAdmissionMetadata = Readonly<{ userId: string; requestKey: string; inputText: string;
-  estimatedInputTokens: number; maxOutputTokens: number; now?: Date }>;
+  estimatedInputTokens: number; maxOutputTokens: number }>;
 
 /** Foundation only: no provider is injected, invoked, or imported here. */
 export class AiService {
@@ -38,7 +38,7 @@ export class AiService {
       inputCharacters: input.inputText.length, estimatedInputTokens: input.estimatedInputTokens,
       maxOutputTokens: input.maxOutputTokens, model, policy,
       globalDailyBudgetMicros: this.server.globalDailyBudgetMicros,
-      globalMonthlyBudgetMicros: this.server.globalMonthlyBudgetMicros, now: input.now });
+      globalMonthlyBudgetMicros: this.server.globalMonthlyBudgetMicros });
   }
 
   /** Settles metadata only; absent/untrustworthy provider usage consumes the entire reservation. */

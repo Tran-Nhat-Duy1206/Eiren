@@ -36,6 +36,9 @@ describe('V7 optional server AI configuration', () => {
     enabled(); process.env.AI_MODEL_ID = 'unapproved'; expect(() => loadEnv()).toThrow(/AI_MODEL_ID/);
     enabled(); process.env.AI_MODEL_CATALOG = '[{"providerId":"operator-provider","modelId":"approved","inputUsdPerMillionTokens":-1}]';
     expect(() => loadEnv()).toThrow(/AI_MODEL_CATALOG/);
+    enabled(); process.env.AI_MODEL_CATALOG = JSON.stringify([{ providerId: 'operator-provider', modelId: 'approved',
+      inputUsdPerMillionTokens: 0, outputUsdPerMillionTokens: 0, maxInputTokens: 2048, maxOutputTokens: 512 }]);
+    expect(() => loadEnv()).toThrow(/AI_MODEL_CATALOG/);
     enabled(); process.env.AI_ENDPOINT = 'https://user:secret@example.org/v1'; expect(() => loadEnv()).toThrow(/AI_ENDPOINT/);
     enabled(); process.env.AI_TIMEOUT_MS = '15001'; expect(() => loadEnv()).toThrow(/AI_TIMEOUT_MS/);
     enabled(); process.env.AI_PROCESS_CONCURRENCY = '5'; expect(() => loadEnv()).toThrow(/AI_PROCESS_CONCURRENCY/);

@@ -17,7 +17,7 @@ const server: AiServerConfig = { providerId: 'approved', endpoint: 'https://prov
     userRequestsPerDay: 10, userCooldownSeconds: 30, guildConcurrency: 1,
     processConcurrency: 4, monthlyBudgetUsd: 5 } };
 const metadata = { userId, requestKey: 'interaction-1', inputText: 'private prompt never persisted',
-  estimatedInputTokens: 100, maxOutputTokens: 128 };
+  estimatedInputTokens: 100, maxOutputTokens: 128, now: new Date('2000-01-01T00:00:00.000Z') };
 const permission = { require: vi.fn(async () => {}) } as unknown as PermissionService;
 
 describe('V7.1 metadata-only AI admission boundary', () => {
@@ -41,6 +41,7 @@ describe('V7.1 metadata-only AI admission boundary', () => {
     const persistedInput = JSON.stringify(admit.mock.calls);
     expect(persistedInput).not.toContain(metadata.inputText);
     expect(persistedInput).not.toContain(server.apiKey);
+    expect(persistedInput).not.toContain('"now"');
     expect(permission.require).toHaveBeenCalledWith(actor, 'MEMBER');
   });
   it('rejects mismatched guild/user and oversized requests before writing', async () => {
@@ -59,6 +60,12 @@ describe('V7.1 metadata-only AI admission boundary', () => {
     expect(maximumCostMicros(model, 100, 128)).toBe(712);
     expect(maximumCostMicros({ ...model, inputUsdPerMillionTokens: 0.0000001 }, 1, 1)).toBe(5);
     expect(() => maximumCostMicros({ ...model, inputUsdPerMillionTokens: Number.NaN }, 1, 1)).toThrow();
+    expect(() => maximumCostMicros({ ...model, inputUsdPerMillionTokens: 0 }, 1, 1)).toThrow();
+    expect(() => maximumCostMicros({ ...model, outputUsdPerMillionTokens: 0 }, 1, 1)).toThrow();
+    expect(() => maximumCostMicros({ ...model, inputUsdPerMillionTokens: -1 }, 1, 1)).toThrow();
+    expect(() => maximumCostMicros({ ...model, inputUsdPerMillionTokens: Number.POSITIVE_INFINITY }, 1, 1)).toThrow();
+    expect(() => maximumCostMicros(model, Number.MAX_SAFE_INTEGER, 1)).toThrow();
+    expect(() => maximumCostMicros({ ...model, outputUsdPerMillionTokens: 1001 }, 1, 1)).toThrow();
   });
   it('does not invent actual usage when a provider result is absent', async () => {
     const settle = vi.fn(async () => false);

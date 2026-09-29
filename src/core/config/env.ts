@@ -50,8 +50,8 @@ const aiSchema = z.object({
 });
 const catalogSchema = z.array(z.object({
   providerId: z.string().regex(/^[a-z0-9_-]{1,64}$/), modelId: z.string().regex(/^[A-Za-z0-9._:/-]{1,100}$/),
-  inputUsdPerMillionTokens: z.number().finite().nonnegative().max(1000),
-  outputUsdPerMillionTokens: z.number().finite().nonnegative().max(1000),
+  inputUsdPerMillionTokens: z.number().finite().positive().max(1000),
+  outputUsdPerMillionTokens: z.number().finite().positive().max(1000),
   maxInputTokens: positive(AI_DEFAULT_LIMITS.maxEstimatedInputTokens),
   maxOutputTokens: positive(AI_DEFAULT_LIMITS.maxOutputTokens),
 }).strict()).min(1);

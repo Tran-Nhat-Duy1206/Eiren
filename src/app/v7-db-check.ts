@@ -91,6 +91,22 @@ try {
   assert('monthlyGuildBudgetRejectsOverrun', await ai.admit(options(ingress, `budget-${id}`, '32345678901234567',
     new Date(now.getTime() + 35_000))) === null);
   await db.update(aiSettings).set({ monthlyBudgetMicros: null }).where(eq(aiSettings.guildId, guildId));
+  const guildConcurrencyRace = await Promise.all([
+    ai.admit(options(ingress, `guild-concurrency-a-${id}`, '13345678901234567', new Date(now.getTime() + 40_000))),
+    ai.admit(options(ingress, `guild-concurrency-b-${id}`, '14345678901234567', new Date(now.getTime() + 40_000))),
+  ]);
+  assert('guildConcurrentReservationsOneWithDailyRoom', guildConcurrencyRace.filter(Boolean).length === 1);
+  const guildWinner = guildConcurrencyRace.find(item => item !== null);
+  if (guildWinner) await ai.settle(guildWinner, null, new Date(now.getTime() + 41_000));
+  const sameKey = `same-key-race-${id}`;
+  const sameKeyRace = await Promise.all([
+    ai.admit(options(ingress, sameKey, '15345678901234567', new Date(now.getTime() + 75_000))),
+    ai.admit(options(ingress, sameKey, '16345678901234567', new Date(now.getTime() + 75_000))),
+  ]);
+  assert('simultaneousRequestKeyReplayIsUnique', sameKeyRace.filter(Boolean).length === 1 &&
+    (await db.select().from(aiRequests).where(and(eq(aiRequests.guildId, guildId), eq(aiRequests.requestKey, sameKey)))).length === 1);
+  const keyWinner = sameKeyRace.find(item => item !== null);
+  if (keyWinner) await ai.settle(keyWinner, null, new Date(now.getTime() + 76_000));
   await guildRepo.setModuleState(guildId, 'ai', false, userId);
   assert('disabledBeforeAdmissionRejectsToken', await ai.admit(options(ingress, `disabled-${id}`)) === null);
   await guildRepo.setModuleState(guildId, 'ai', true, userId);
@@ -122,6 +138,17 @@ try {
     .every(row => row.requests <= 1));
   const admittedFromGlobalRace = globalRace.find(item => item !== null);
   if (admittedFromGlobalRace) await ai.settle(admittedFromGlobalRace, null, new Date(upcoming.getTime() + 1_000));
+  const edge = new Date(Date.UTC(now.getUTCFullYear() + 1, 0, 1, 23, 59, 55));
+  const edgeUser = '17345678901234567';
+  const beforeMidnight = await ai.admit(options(otherIngress, `midnight-a-${id}`, edgeUser, edge));
+  if (!beforeMidnight) throw new Error('Expected pre-midnight request');
+  await ai.settle(beforeMidnight, null, new Date(edge.getTime() + 1_000));
+  assert('cooldownCrossesUtcMidnight', await ai.admit(options(otherIngress, `midnight-rejected-${id}`,
+    edgeUser, new Date(edge.getTime() + 10_000))) === null);
+  const afterCooldown = await ai.admit(options(otherIngress, `midnight-b-${id}`,
+    edgeUser, new Date(edge.getTime() + 31_000)));
+  assert('dailyQuotaResetsAtUtcMidnightButCooldownDoesNot', afterCooldown !== null);
+  if (afterCooldown) await ai.settle(afterCooldown, null, new Date(edge.getTime() + 32_000));
   const delayed = await ai.admit(options(fresh, `old-settle-${id}`, '52345678901234567',
     new Date(upcoming.getTime() + 86_400_000)));
   assert('reserveBeforeToggleForDelayedSettlement', delayed !== null);
@@ -147,6 +174,71 @@ try {
     new Date(expiring.leaseUntil.getTime() + 1)));
   const [expired] = await db.select().from(aiRequests).where(eq(aiRequests.id, expiring.id));
   assert('expiredMetadataConservative', expired?.status === 'EXPIRED' && expired.actualCostMicros === expiring.reservedCostMicros);
+  // Hold the actual PostgreSQL advisory lock across lease expiry, not just a mocked clock.
+  const holdGlobalLock = async () => {
+    let acquired!: () => void;
+    const ready = new Promise<void>(resolve => { acquired = resolve; });
+    const release = db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(0, hashtext('eiren-ai-budget'))`);
+      acquired();
+      await tx.execute(sql`SELECT pg_sleep(1.5)`);
+    });
+    await ready;
+    return { release };
+  };
+  const liveIngress = await ai.reserveIngress(otherId);
+  if (!liveIngress) throw new Error('Expected other guild ingress for lock-wait regression');
+  const lateLock = await holdGlobalLock();
+  const latePromise = ai.admit(options(liveIngress, `late-clock-${id}`, '82345678901234567', now,
+    { now: undefined }));
+  await lateLock.release;
+  const late = await latePromise;
+  assert('admissionLeaseStartsAfterLockWait', late !== null &&
+    late.leaseUntil.getTime() - Date.now() > 59_400);
+  if (!late) throw new Error('Expected late admission');
+  const settleLock = await holdGlobalLock();
+  await db.update(aiRequests).set({ leaseUntil: new Date(Date.now() + 500) }).where(eq(aiRequests.id, late.id));
+  const lateSettlement = ai.settle(late, actual);
+  await settleLock.release;
+  assert('lockWaitCannotAuthorizeExpiredSettlement', !await lateSettlement);
+  const [lateRow] = await db.select().from(aiRequests).where(eq(aiRequests.id, late.id));
+  assert('expiredAfterLockWaitChargesOnce', lateRow?.status === 'EXPIRED' &&
+    lateRow.actualCostMicros === late.reservedCostMicros);
+  const duplicate = await ai.admit(options(liveIngress, `duplicate-settle-${id}`,
+    '92345678901234567', now, { now: undefined }));
+  if (!duplicate) throw new Error('Expected live reservation for duplicate settlement');
+  const liveDay = new Date().toISOString().slice(0, 10);
+  const usageFor = () => db.select().from(aiUsageDaily).where(and(eq(aiUsageDaily.guildId, otherId), eq(aiUsageDaily.utcDay, liveDay)));
+  const [beforeDuplicate] = await usageFor();
+  const duplicateResults = await Promise.all([ai.settle(duplicate, actual), ai.settle(duplicate, actual)]);
+  const [afterDuplicate] = await usageFor();
+  assert('concurrentDuplicateSettlementExactlyOnce', duplicateResults.filter(Boolean).length === 1 &&
+    afterDuplicate?.reservedCostMicros === beforeDuplicate!.reservedCostMicros - duplicate.reservedCostMicros &&
+    afterDuplicate.settledCostMicros === beforeDuplicate!.settledCostMicros + actual.costMicros &&
+    afterDuplicate.inputTokens === beforeDuplicate!.inputTokens + actual.inputTokens &&
+    afterDuplicate.outputTokens === beforeDuplicate!.outputTokens + actual.outputTokens);
+  const racing = await ai.admit(options(liveIngress, `expiry-race-${id}`,
+    '10345678901234567', now, { now: undefined }));
+  if (!racing) throw new Error('Expected live reservation for expiry race');
+  const [beforeRace] = await usageFor();
+  const expiryLock = await holdGlobalLock();
+  await db.update(aiRequests).set({ leaseUntil: new Date(Date.now() + 500) }).where(eq(aiRequests.id, racing.id));
+  const cleanupPromise = ai.admit(options(liveIngress, `cleanup-race-${id}`,
+    '11345678901234567', now, { now: undefined }));
+  const settlePromise = ai.settle(racing, actual);
+  await expiryLock.release;
+  const [cleanup, racingSettlement] = await Promise.all([cleanupPromise, settlePromise]);
+  assert('expiredCleanupAndSettlementCannotAuthorize', cleanup !== null && racingSettlement === false);
+  const [raceRow] = await db.select().from(aiRequests).where(eq(aiRequests.id, racing.id));
+  assert('expiredCleanupAndSettlementOneTerminalCharge', raceRow?.status === 'EXPIRED' &&
+    raceRow.actualCostMicros === racing.reservedCostMicros);
+  if (!cleanup) throw new Error('Expected post-expiration admission');
+  assert('newAdmissionSettlesAfterExpiryRace', await ai.settle(cleanup, null));
+  const [afterRace] = await usageFor();
+  assert('expiryRaceCountersRemainExact', afterRace?.requests === beforeRace!.requests + 1 &&
+    afterRace.reservedCostMicros === beforeRace!.reservedCostMicros - racing.reservedCostMicros &&
+    afterRace.settledCostMicros === beforeRace!.settledCostMicros + racing.reservedCostMicros + cleanup.reservedCostMicros &&
+    afterRace.inputTokens === beforeRace!.inputTokens && afterRace.outputTokens === beforeRace!.outputTokens);
   assert('rejectNegativeDailyCounters', await rejection(() => db.update(aiUsageDaily)
     .set({ reservedCostMicros: -1 }).where(and(eq(aiUsageDaily.guildId, guildId), eq(aiUsageDaily.utcDay, day)))));
   assert('rejectOversizedGuildSettings', await rejection(() => db.update(aiSettings)

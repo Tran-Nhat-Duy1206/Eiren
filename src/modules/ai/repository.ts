@@ -18,7 +18,7 @@ const dayOf = (date: Date) => date.toISOString().slice(0, 10);
 const monthOf = (day: string) => `${day.slice(0, 7)}-01`;
 const MICROS_PER_USD = 1_000_000;
 const ceiling = (value: number, upper: number) => Number.isSafeInteger(value) && value >= 0 && value <= upper;
-const money = (usd: number) => Number.isFinite(usd) && usd >= 0 && usd <= 1000
+const money = (usd: number) => Number.isFinite(usd) && usd > 0 && usd <= 1000
   ? Math.ceil(usd * MICROS_PER_USD) : NaN;
 
 /** Pessimistic server-approved model pricing; never derive billing bounds from provider output. */
@@ -48,13 +48,10 @@ export class AiRepository {
 
   async admit(input: AiAdmissionInput): Promise<AiAdmission | null> {
     const { ingress, userId, requestKey, model, policy } = input;
-    const now = input.now ?? new Date();
-    const day = dayOf(now), month = monthOf(day);
-    const nextDay = new Date(new Date(`${day}T00:00:00.000Z`).getTime() + 86_400_000);
-    const nextMonth = dayOf(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)));
     if (!/^\d{17,20}$/.test(userId) || !/^[A-Za-z0-9:_-]{1,128}$/.test(requestKey) ||
       model.providerId !== policy.providerId || model.modelId !== policy.modelId ||
-      !Number.isFinite(now.getTime()) || !ceiling(input.inputCharacters, AI_DEFAULT_LIMITS.maxInputCharacters) ||
+      (input.now !== undefined && !Number.isFinite(input.now.getTime())) ||
+      !ceiling(input.inputCharacters, AI_DEFAULT_LIMITS.maxInputCharacters) ||
       !ceiling(input.estimatedInputTokens, Math.min(AI_DEFAULT_LIMITS.maxEstimatedInputTokens, policy.maxEstimatedInputTokens, model.maxInputTokens)) ||
       !ceiling(input.maxOutputTokens, Math.min(AI_DEFAULT_LIMITS.maxOutputTokens, policy.maxOutputTokens, model.maxOutputTokens)) ||
       input.maxOutputTokens === 0 || input.inputCharacters === 0 || input.estimatedInputTokens === 0 ||
@@ -71,6 +68,11 @@ export class AiRepository {
       if (!module?.enabled || module.epoch !== ingress.epoch) return null;
       const [settings] = await tx.select().from(aiSettings).where(eq(aiSettings.guildId, ingress.guildId));
       if (!settings || settings.providerId !== model.providerId || settings.modelId !== model.modelId) return null;
+      // Take the production clock after contested locks, not before waiting in their queues.
+      const now = input.now ?? new Date();
+      const day = dayOf(now), month = monthOf(day);
+      const nextDay = new Date(new Date(`${day}T00:00:00.000Z`).getTime() + 86_400_000);
+      const nextMonth = dayOf(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)));
       const dailyCap = Math.min(AI_DEFAULT_LIMITS.guildRequestsPerDay, policy.guildRequestsPerDay,
         settings.guildRequestsPerDay ?? Number.POSITIVE_INFINITY);
       const userCap = Math.min(AI_DEFAULT_LIMITS.userRequestsPerDay, policy.userRequestsPerDay,
@@ -141,8 +143,8 @@ export class AiRepository {
     });
   }
 
-  async settle(admission: AiAdmission, actual: AiActualUsage | null, now = new Date()): Promise<boolean> {
-    if (!Number.isFinite(now.getTime()) || (actual && (!ceiling(actual.inputTokens, AI_DEFAULT_LIMITS.maxEstimatedInputTokens) ||
+  async settle(admission: AiAdmission, actual: AiActualUsage | null, at?: Date): Promise<boolean> {
+    if ((at !== undefined && !Number.isFinite(at.getTime())) || (actual && (!ceiling(actual.inputTokens, AI_DEFAULT_LIMITS.maxEstimatedInputTokens) ||
       !ceiling(actual.outputTokens, AI_DEFAULT_LIMITS.maxOutputTokens) ||
       !ceiling(actual.costMicros, admission.reservedCostMicros)))) throw new Error('Invalid AI usage settlement');
     return this.db.transaction(async tx => {
@@ -154,6 +156,8 @@ export class AiRepository {
       if (!request || request.status !== 'RESERVED' || request.userId !== admission.userId ||
         request.epoch !== admission.epoch || request.modelId !== admission.modelId ||
         request.reservedCostMicros !== admission.reservedCostMicros) return false;
+      // Re-evaluate the real lease only after obtaining both locks and the request row.
+      const now = at ?? new Date();
       const withinLease = request.leaseUntil > now;
       const cost = withinLease && actual ? actual.costMicros : request.reservedCostMicros;
       if (actual && (actual.inputTokens > request.reservedInputTokens || actual.outputTokens > request.reservedOutputTokens))
