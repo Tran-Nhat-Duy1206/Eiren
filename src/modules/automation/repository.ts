@@ -161,7 +161,8 @@ export class AutomationRepository {
     });
   }
   /** Locks at most twenty eligible rows globally, then serializes budget under the guild row. */
-  async claimDue(now?: Date) {
+  async claimDue(now?: Date, limit = 20) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 20) bad('Invalid claim limit');
     return this.db.transaction(async tx => {
       await this.serialize(tx);
       const selectionTime = now ?? new Date();
@@ -171,7 +172,7 @@ export class AutomationRepository {
         FROM automation_executions e WHERE e.status = 'PENDING' AND e.created_at <= ${selectionTime}
         AND (e.next_attempt_at IS NULL OR e.next_attempt_at <= ${selectionTime})
       ) SELECT e.id,e.guild_id FROM automation_executions e JOIN ranked r ON r.id=e.id
-        WHERE r.rn <= 2 ORDER BY e.created_at,e.id LIMIT 20 FOR UPDATE OF e SKIP LOCKED`);
+        WHERE r.rn <= 2 ORDER BY e.created_at,e.id LIMIT ${limit} FOR UPDATE OF e SKIP LOCKED`);
       const claimed = [];
       for (const raw of [...found.rows].sort((a, b) => String(a.guild_id).localeCompare(String(b.guild_id)))) {
         const candidate = raw as { id: string; guild_id: string };
@@ -199,6 +200,15 @@ export class AutomationRepository {
       }
       return claimed;
     });
+  }
+  async getClaimActions(guildId: string, executionId: string, claimToken: string) {
+    const [execution] = await this.db.select().from(automationExecutions).where(and(eq(automationExecutions.guildId, guildId),
+      eq(automationExecutions.id, executionId), eq(automationExecutions.status, 'RUNNING'), eq(automationExecutions.claimToken, claimToken)));
+    if (!execution) return null;
+    const actions = await this.db.select().from(automationExecutionActions).where(eq(automationExecutionActions.executionId, executionId))
+      .orderBy(automationExecutionActions.position);
+    return { automationId: execution.automationId, actions: actions.map(({ position, actionKey, actionVersion, config }) =>
+      ({ position, actionKey, actionVersion, config })) };
   }
   async finalizeClaim(guildId: string, executionId: string, token: string, currentAuthority: boolean, now?: Date) {
     return this.db.transaction(async tx => {
@@ -232,6 +242,216 @@ export class AutomationRepository {
       return true;
     });
   }
+  private async stopAction(tx: Tx, executionId: string, position: number, code: string, at: Date) {
+    const runs = await tx.select().from(automationActionRuns).where(eq(automationActionRuns.executionId, executionId)).orderBy(automationActionRuns.position);
+    const partial = runs.some(run => run.status === 'SUCCEEDED');
+    await tx.insert(automationActionRuns).values({ executionId, position, status: 'SKIPPED', safeErrorCode: code, updatedAt: at })
+      .onConflictDoUpdate({ target: [automationActionRuns.executionId, automationActionRuns.position],
+        set: { status: 'SKIPPED', safeErrorCode: code, updatedAt: at },
+        setWhere: eq(automationActionRuns.status, 'PENDING') });
+    await tx.update(automationExecutions).set({ status: partial ? 'FAILED' : 'SKIPPED',
+      safeErrorCode: partial ? 'PARTIAL_' + code : code, completedAt: at, claimToken: null, leaseUntil: null,
+      nextAttemptAt: null }).where(eq(automationExecutions.id, executionId));
+  }
+  private async liveClaim(tx: Tx, guildId: string, id: string, token: string, now?: Date) {
+    const [execution] = await tx.select().from(automationExecutions).where(and(eq(automationExecutions.guildId, guildId),
+      eq(automationExecutions.id, id))).for('update');
+    const at = now ?? new Date();
+    if (!validDate(at)) bad('Invalid time');
+    return { execution: execution?.status === 'RUNNING' && execution.claimToken === token && execution.leaseUntil &&
+      execution.leaseUntil > at ? execution : null, at };
+  }
+  async prepareAction(guildId: string, executionId: string, claimToken: string, position: number, currentAuthority: boolean, now?: Date):
+    Promise<{ kind: 'READY'; snapshot: { position: number; actionKey: string; actionVersion: number; config: Record<string, unknown> }; dispatchToken: string } |
+      { kind: 'BLOCKED' | 'LOST'; code: string }> {
+    return this.db.transaction(async tx => {
+      await this.serialize(tx);
+      const { execution, at } = await this.liveClaim(tx, guildId, executionId, claimToken, now);
+      if (!execution) return { kind: 'LOST', code: 'CLAIM_LOST' };
+      const [module] = await tx.select().from(guildModules).where(and(eq(guildModules.guildId, guildId), eq(guildModules.moduleKey, 'automation'))).for('update');
+      const [rule] = await tx.select().from(automations).where(and(eq(automations.guildId, guildId), eq(automations.id, execution.automationId))).for('update');
+      const snapshots = await tx.select().from(automationExecutionActions).where(eq(automationExecutionActions.executionId, executionId)).orderBy(automationExecutionActions.position);
+      const live = await tx.select().from(automationActions).where(eq(automationActions.automationId, execution.automationId)).orderBy(automationActions.position);
+      const runs = await tx.select().from(automationActionRuns).where(eq(automationActionRuns.executionId, executionId)).orderBy(automationActionRuns.position);
+      const selected = snapshots.find(item => item.position === position);
+      let valid = false;
+      if (rule && snapshots.length >= 1 && snapshots.length <= 2) try {
+        validateAutomationConfig({ schemaVersion: 1, enabled: rule.enabled,
+          trigger: { id: rule.triggerKey, version: rule.triggerVersion, config: rule.triggerConfig },
+          actions: snapshots.map(item => ({ id: item.actionKey, version: item.actionVersion, config: item.config })) },
+        AUTOMATION_TRIGGERS, AUTOMATION_ACTIONS);
+        valid = rule.approvedCapability === (snapshots.every(item => item.actionKey === 'STAFF_LOG') ? 'STAFF_LOG' : 'SEND_MESSAGE') &&
+          (rule.triggerConfig.kind !== 'daily' || rule.triggerConfig.timezone === rule.timezone) &&
+          snapshots.length === live.length && snapshots.every((item, index) => item.position === index && live[index]?.position === index &&
+            item.actionKey === live[index]?.actionKey && item.actionVersion === live[index]?.actionVersion &&
+            JSON.stringify(item.config) === JSON.stringify(live[index]?.config));
+      } catch { /* Invalid persisted JSON must never authorize dispatch. */ }
+      const safe = valid && currentAuthority === true && module?.enabled === true && module.version === execution.moduleEpoch &&
+        rule?.enabled === true && !rule.deletedAt && rule.configVersion === execution.configVersion;
+      const order = selected && runs.every(run => run.position >= position || run.status === 'SUCCEEDED') &&
+        snapshots.every(item => item.position >= position || runs.some(run => run.position === item.position && run.status === 'SUCCEEDED')) &&
+        !runs.some(run => run.position >= position && run.status !== 'PENDING');
+      if (!safe || !order || !selected) {
+        const blockedAt = now ?? new Date();
+        if (!validDate(blockedAt)) bad('Invalid time');
+        if (!execution.leaseUntil || execution.leaseUntil <= blockedAt) return { kind: 'LOST', code: 'CLAIM_LOST' };
+        const code = !safe ? 'STALE_CONFIG' : 'INVALID_ACTION_ORDER';
+        if (!runs.some(run => ['RUNNING', 'UNCERTAIN'].includes(run.status))) {
+          if (selected && !runs.some(run => run.position === position && run.status === 'SUCCEEDED'))
+            await this.stopAction(tx, executionId, position, code, blockedAt);
+          else {
+            const partial = runs.some(run => run.status === 'SUCCEEDED');
+            await tx.update(automationExecutions).set({ status: partial ? 'FAILED' : 'SKIPPED',
+              safeErrorCode: partial ? 'PARTIAL_INVALID_ACTION_ORDER' : 'INVALID_ACTION_ORDER', completedAt: blockedAt,
+              claimToken: null, leaseUntil: null, nextAttemptAt: null }).where(eq(automationExecutions.id, executionId));
+          }
+        }
+        return { kind: 'BLOCKED', code };
+      }
+      // A row-lock wait or validation may have consumed the lease.
+      const dispatchAt = now ?? new Date();
+      if (!validDate(dispatchAt)) bad('Invalid time');
+      if (!execution.leaseUntil || execution.leaseUntil <= dispatchAt) return { kind: 'LOST', code: 'CLAIM_LOST' };
+      const dispatchToken = randomUUID();
+      await tx.insert(automationActionRuns).values({ executionId, position, status: 'RUNNING', attempts: 1, dispatchToken, updatedAt: dispatchAt })
+        .onConflictDoUpdate({ target: [automationActionRuns.executionId, automationActionRuns.position],
+          set: { status: 'RUNNING', attempts: 1, dispatchToken, updatedAt: dispatchAt }, setWhere: eq(automationActionRuns.status, 'PENDING') });
+      return { kind: 'READY', dispatchToken, snapshot: { position, actionKey: selected.actionKey,
+        actionVersion: selected.actionVersion, config: selected.config } };
+    });
+  }
+  async stopBeforeDispatch(guildId: string, id: string, token: string, position: number, safeCode: string, now?: Date) {
+    if (!/^[A-Z_]{1,32}$/.test(safeCode)) bad('Invalid safe code');
+    return this.db.transaction(async tx => {
+      await this.serialize(tx);
+      const { execution, at } = await this.liveClaim(tx, guildId, id, token, now);
+      if (!execution) return false;
+      const [snapshot] = await tx.select().from(automationExecutionActions).where(and(eq(automationExecutionActions.executionId, id), eq(automationExecutionActions.position, position)));
+      const [run] = await tx.select().from(automationActionRuns).where(and(eq(automationActionRuns.executionId, id), eq(automationActionRuns.position, position)));
+      if (!snapshot || (run && run.status !== 'PENDING')) return false;
+      await this.stopAction(tx, id, position, safeCode, at);
+      return true;
+    });
+  }
+  async confirmAction(guildId: string, id: string, token: string, position: number, messageId: string, now?: Date, dispatchToken?: string) {
+    if (!/^[0-9]{17,20}$/.test(messageId)) bad('Invalid message identifier');
+    return this.db.transaction(async tx => {
+      await this.serialize(tx);
+      const [execution] = await tx.select().from(automationExecutions).where(and(eq(automationExecutions.guildId, guildId), eq(automationExecutions.id, id))).for('update');
+      const [run] = await tx.select().from(automationActionRuns).where(and(eq(automationActionRuns.executionId, id), eq(automationActionRuns.position, position)));
+      const at = now ?? new Date();
+      if (!validDate(at)) bad('Invalid time');
+      if (!execution || !run || run.status !== 'RUNNING' && run.status !== 'UNCERTAIN' ||
+          !run.dispatchToken || (dispatchToken && run.dispatchToken !== dispatchToken) ||
+          (run.status === 'UNCERTAIN' && dispatchToken !== run.dispatchToken) || execution.claimToken !== token &&
+          !(execution.status === 'UNCERTAIN' && run.status === 'UNCERTAIN')) return false;
+      await tx.update(automationActionRuns).set({ status: 'SUCCEEDED', discordMessageId: messageId, safeErrorCode: null, updatedAt: at })
+        .where(and(eq(automationActionRuns.executionId, id), eq(automationActionRuns.position, position)));
+      if (execution.status === 'RUNNING' && execution.claimToken === token) {
+        const snapshots = await tx.select({ position: automationExecutionActions.position }).from(automationExecutionActions)
+          .where(eq(automationExecutionActions.executionId, id));
+        const runs = await tx.select().from(automationActionRuns).where(eq(automationActionRuns.executionId, id));
+        if (snapshots.length && snapshots.every(snapshot => runs.some(item => item.position === snapshot.position && item.status === 'SUCCEEDED')))
+          await tx.update(automationExecutions).set({ status: 'SUCCEEDED', safeErrorCode: null, completedAt: at,
+            claimToken: null, leaseUntil: null, nextAttemptAt: null }).where(eq(automationExecutions.id, id));
+      }
+      return true;
+    });
+  }
+  async markAmbiguous(guildId: string, id: string, token: string, position: number, now?: Date, dispatchToken?: string) {
+    return this.db.transaction(async tx => {
+      await this.serialize(tx);
+      const [execution] = await tx.select().from(automationExecutions).where(and(eq(automationExecutions.guildId, guildId), eq(automationExecutions.id, id))).for('update');
+      const [run] = await tx.select().from(automationActionRuns).where(and(eq(automationActionRuns.executionId, id), eq(automationActionRuns.position, position)));
+      const at = now ?? new Date();
+      if (!validDate(at)) bad('Invalid time');
+      if (!execution || !run || !run.dispatchToken || (dispatchToken && run.dispatchToken !== dispatchToken) ||
+          run.status !== 'RUNNING' && run.status !== 'UNCERTAIN' ||
+          execution.status !== 'RUNNING' && execution.status !== 'UNCERTAIN' ||
+          execution.status === 'RUNNING' && execution.claimToken !== token) return false;
+      await tx.update(automationActionRuns).set({ status: 'UNCERTAIN', safeErrorCode: 'ACTION_OUTCOME_UNKNOWN', updatedAt: at })
+        .where(and(eq(automationActionRuns.executionId, id), eq(automationActionRuns.position, position)));
+      await tx.update(automationExecutions).set({ status: 'UNCERTAIN', safeErrorCode: 'ACTION_OUTCOME_UNKNOWN',
+        completedAt: at, claimToken: null, leaseUntil: null, nextAttemptAt: null }).where(eq(automationExecutions.id, id));
+      return true;
+    });
+  }
+  async reconcileUncertain(guildId: string, id: string, position: number, reconcilerUserId: string,
+    result: 'CONFIRMED_SENT' | 'CONFIRMED_NOT_SENT', now?: Date): Promise<boolean> {
+    if (!/^[0-9]{17,20}$/.test(reconcilerUserId) || !['CONFIRMED_SENT', 'CONFIRMED_NOT_SENT'].includes(result)) bad('Invalid reconciliation');
+    return this.db.transaction(async tx => {
+      await this.serialize(tx);
+      const [execution] = await tx.select().from(automationExecutions).where(and(eq(automationExecutions.guildId, guildId), eq(automationExecutions.id, id))).for('update');
+      const [run] = await tx.select().from(automationActionRuns).where(and(eq(automationActionRuns.executionId, id), eq(automationActionRuns.position, position)));
+      const at = now ?? new Date();
+      if (!validDate(at)) bad('Invalid time');
+      if (execution?.status !== 'UNCERTAIN') return false;
+      // A late receipt confirms delivery after recovery, but never resumes dispatch.
+      // An ADMIN explicitly closes the terminal execution without fabricating a receipt.
+      if (result === 'CONFIRMED_SENT' && run?.status === 'SUCCEEDED' && run.discordMessageId && !run.reconciliationResult) {
+        const snapshots = await tx.select({ position: automationExecutionActions.position }).from(automationExecutionActions)
+          .where(eq(automationExecutionActions.executionId, id));
+        const existing = await tx.select().from(automationActionRuns).where(eq(automationActionRuns.executionId, id));
+        if (snapshots.some(snapshot => snapshot.position === position) &&
+            !existing.some(item => item.status === 'RUNNING' || item.status === 'UNCERTAIN' || item.status === 'FAILED' || item.status === 'SKIPPED') &&
+            snapshots.every(snapshot => snapshot.position >= position || existing.some(item =>
+              item.position === snapshot.position && item.status === 'SUCCEEDED' && item.discordMessageId))) {
+          await tx.update(automationActionRuns).set({ reconciliationResult: result, reconciledBy: reconcilerUserId,
+            reconciledAt: at, updatedAt: at }).where(and(eq(automationActionRuns.executionId, id), eq(automationActionRuns.position, position)));
+          const allSent = snapshots.length > 0 && snapshots.every(snapshot => existing.some(item =>
+            item.position === snapshot.position && item.status === 'SUCCEEDED' && item.discordMessageId));
+          if (!allSent) await tx.update(automationActionRuns).set({ status: 'SKIPPED', safeErrorCode: 'RECONCILED_STOP', updatedAt: at })
+            .where(and(eq(automationActionRuns.executionId, id), eq(automationActionRuns.status, 'PENDING')));
+          await tx.update(automationExecutions).set({ status: allSent ? 'SUCCEEDED' : 'FAILED',
+            safeErrorCode: allSent ? null : 'PARTIAL_RECONCILED', completedAt: at,
+            claimToken: null, leaseUntil: null, nextAttemptAt: null }).where(eq(automationExecutions.id, id));
+          return true;
+        }
+      }
+      // A prior action has a receipt, but the lease expired before the next action
+      // started. Preserve V7.3 UNCERTAIN recovery and allow explicit no-send closure.
+      if (result === 'CONFIRMED_NOT_SENT' && (!run || run.status === 'PENDING')) {
+        const snapshots = await tx.select({ position: automationExecutionActions.position }).from(automationExecutionActions)
+          .where(eq(automationExecutionActions.executionId, id)).orderBy(automationExecutionActions.position);
+        const existing = await tx.select().from(automationActionRuns).where(eq(automationActionRuns.executionId, id));
+        const prior = snapshots.filter(snapshot => snapshot.position < position);
+        const next = snapshots.find(snapshot => snapshot.position === position);
+        if (next && prior.length > 0 && snapshots.every(snapshot => snapshot.position >= position ||
+            existing.some(item => item.position === snapshot.position && item.status === 'SUCCEEDED' && item.discordMessageId)) &&
+            !existing.some(item => item.status === 'RUNNING' || item.status === 'UNCERTAIN' ||
+              item.position >= position && item.status !== 'PENDING') && !run?.reconciliationResult) {
+          await tx.insert(automationActionRuns).values({ executionId: id, position, status: 'FAILED', attempts: 0,
+            reconciliationResult: result, reconciledBy: reconcilerUserId, reconciledAt: at,
+            safeErrorCode: 'CONFIRMED_NOT_SENT', updatedAt: at }).onConflictDoUpdate({
+            target: [automationActionRuns.executionId, automationActionRuns.position],
+            set: { status: 'FAILED', reconciliationResult: result, reconciledBy: reconcilerUserId,
+              reconciledAt: at, safeErrorCode: 'CONFIRMED_NOT_SENT', updatedAt: at },
+            setWhere: eq(automationActionRuns.status, 'PENDING') });
+          await tx.update(automationActionRuns).set({ status: 'SKIPPED', safeErrorCode: 'RECONCILED_STOP', updatedAt: at })
+            .where(and(eq(automationActionRuns.executionId, id), eq(automationActionRuns.status, 'PENDING')));
+          await tx.update(automationExecutions).set({ status: 'FAILED', safeErrorCode: 'PARTIAL_RECONCILED',
+            completedAt: at, claimToken: null, leaseUntil: null, nextAttemptAt: null }).where(eq(automationExecutions.id, id));
+          return true;
+        }
+      }
+      if (run?.status !== 'UNCERTAIN' || run.reconciliationResult) return false;
+      await tx.update(automationActionRuns).set({ status: result === 'CONFIRMED_SENT' ? 'SUCCEEDED' : 'FAILED',
+        reconciliationResult: result, reconciledBy: reconcilerUserId, reconciledAt: at, updatedAt: at,
+        safeErrorCode: result === 'CONFIRMED_SENT' ? null : 'CONFIRMED_NOT_SENT' })
+        .where(and(eq(automationActionRuns.executionId, id), eq(automationActionRuns.position, position)));
+      const snapshots = await tx.select({ position: automationExecutionActions.position }).from(automationExecutionActions)
+        .where(eq(automationExecutionActions.executionId, id));
+      const runs = await tx.select().from(automationActionRuns).where(eq(automationActionRuns.executionId, id));
+      const allSent = result === 'CONFIRMED_SENT' && snapshots.length > 0 &&
+        snapshots.every(snapshot => runs.some(item => item.position === snapshot.position && item.status === 'SUCCEEDED'));
+      if (!allSent) await tx.update(automationActionRuns).set({ status: 'SKIPPED', safeErrorCode: 'RECONCILED_STOP', updatedAt: at })
+        .where(and(eq(automationActionRuns.executionId, id), eq(automationActionRuns.status, 'PENDING')));
+      await tx.update(automationExecutions).set({ status: allSent ? 'SUCCEEDED' : 'FAILED',
+        safeErrorCode: allSent ? null : result === 'CONFIRMED_SENT' ? 'PARTIAL_RECONCILED' : 'CONFIRMED_NOT_SENT',
+        completedAt: at, claimToken: null, leaseUntil: null, nextAttemptAt: null }).where(eq(automationExecutions.id, id));
+      return true;
+    });
+  }
   async recoverExpired(now?: Date) {
     return this.db.transaction(async tx => {
       await this.serialize(tx);
@@ -242,6 +462,8 @@ export class AutomationRepository {
       for (const row of rows) {
         const [unsafe] = await tx.select({ position: automationActionRuns.position }).from(automationActionRuns)
           .where(and(eq(automationActionRuns.executionId, row.id), inArray(automationActionRuns.status, ['RUNNING', 'SUCCEEDED', 'UNCERTAIN']))).limit(1);
+        if (unsafe) await tx.update(automationActionRuns).set({ status: 'UNCERTAIN', safeErrorCode: 'ACTION_OUTCOME_UNKNOWN', updatedAt: time })
+          .where(and(eq(automationActionRuns.executionId, row.id), eq(automationActionRuns.status, 'RUNNING')));
         const terminal = Boolean(unsafe) || row.attempts >= 5 || automationExecutionExpired(row.createdAt, time);
         const next = unsafe ? 'UNCERTAIN' : terminal ? 'FAILED' : 'PENDING';
         assertAutomationStatusTransition('RUNNING', next);

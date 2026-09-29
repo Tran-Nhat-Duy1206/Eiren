@@ -72,6 +72,7 @@ import { AiRuntime } from '../modules/ai/runtime.js';
 import { pruneAiMetadata } from '../modules/ai/retention.js';
 import { AutomationRepository } from '../modules/automation/repository.js';
 import { AutomationService } from '../modules/automation/service.js';
+import { createAutomationDiscordGateway } from '../modules/automation/discord-gateway.js';
 import { observedHumanVoice } from '../modules/analytics/voice-snapshot.js';
 import { DashboardAuth } from '../dashboard/auth/dashboard-auth.js';
 import { DashboardAccess } from '../dashboard/access/dashboard-access.js';
@@ -186,7 +187,7 @@ const automation = new AutomationService(new AutomationRepository(db), permissio
     if (error instanceof DiscordAPIError && error.code === 10007) return null;
     throw error;
   }
-}, logger);
+}, logger, createAutomationDiscordGateway(client));
 const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
   baseUrl: env.DASHBOARD.DASHBOARD_BASE_URL, sessionSecret: env.DASHBOARD.DASHBOARD_SESSION_SECRET,
   discordClientId: env.DISCORD_CLIENT_ID, discordClientSecret: env.DASHBOARD.DISCORD_CLIENT_SECRET,

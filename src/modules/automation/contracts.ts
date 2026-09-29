@@ -24,7 +24,7 @@ export type AutomationTriggerDefinition = Readonly<{
   /** Metadata only; handlers are intentionally absent. */
   runnable: false;
 }>;
-export type AutomationActionDefinition = AutomationTriggerDefinition & Readonly<{ maxStaticMessageLength: number }>;
+export type AutomationActionDefinition = Omit<AutomationTriggerDefinition, 'runnable'> & Readonly<{ runnable: true; maxStaticMessageLength: number }>;
 export type AutomationExecutionContext = Readonly<{
   guildId: string; automationId: string; executionId: string; depth: number;
   triggerId: string; triggerVersion: number; createdAt: Date;
@@ -45,10 +45,10 @@ export const AUTOMATION_TRIGGERS: readonly AutomationTriggerDefinition[] = Objec
   ]),
 })]);
 export const AUTOMATION_ACTIONS: readonly AutomationActionDefinition[] = Object.freeze([
-  Object.freeze({ id: 'STATIC_MESSAGE', version: 1, schemaVersion: AUTOMATION_SCHEMA_VERSION, runnable: false, timeoutMs: 1000,
+  Object.freeze({ id: 'STATIC_MESSAGE', version: 1, schemaVersion: AUTOMATION_SCHEMA_VERSION, runnable: true, timeoutMs: 20_000,
     idempotency: 'DEDUPLICATED', capability: capability(['GUILD_AVAILABLE', 'CHANNEL_AVAILABLE', 'BOT_SEND_MESSAGES'], 'SEND_MESSAGE'),
     configSchema: z.object({ channelId: snowflake, message }).strict(), maxStaticMessageLength: AUTOMATION_LIMITS.maxStaticMessageLength }),
-  Object.freeze({ id: 'STAFF_LOG', version: 1, schemaVersion: AUTOMATION_SCHEMA_VERSION, runnable: false, timeoutMs: 1000,
+  Object.freeze({ id: 'STAFF_LOG', version: 1, schemaVersion: AUTOMATION_SCHEMA_VERSION, runnable: true, timeoutMs: 20_000,
     idempotency: 'DEDUPLICATED', capability: capability(['GUILD_AVAILABLE', 'CHANNEL_AVAILABLE', 'BOT_SEND_MESSAGES'], 'SEND_MESSAGE'),
     configSchema: z.object({ channelId: snowflake, message }).strict(), maxStaticMessageLength: AUTOMATION_LIMITS.maxStaticMessageLength }),
 ]);
@@ -64,7 +64,7 @@ export function validateAutomationRegistry(triggers: readonly AutomationTriggerD
     for (const entry of entries) {
       if (!idPattern.test(entry.id) || ids.has(entry.id)) throw new Error('Invalid or duplicate automation definition id');
       ids.add(entry.id);
-      if (entry.schemaVersion !== AUTOMATION_SCHEMA_VERSION || !Number.isSafeInteger(entry.version) || entry.version < 1 || entry.runnable !== false ||
+      if (entry.schemaVersion !== AUTOMATION_SCHEMA_VERSION || !Number.isSafeInteger(entry.version) || entry.version < 1 || (entries === triggers ? entry.runnable !== false : entry.runnable !== true) ||
           !entry.configSchema || typeof entry.configSchema.safeParse !== 'function')
         throw new Error('Unsupported automation definition version or configuration schema');
       if (!Number.isSafeInteger(entry.timeoutMs) || entry.timeoutMs < 1 || entry.timeoutMs > 60_000) throw new Error('Invalid automation timeout');

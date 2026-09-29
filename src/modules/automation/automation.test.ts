@@ -8,16 +8,17 @@ import { AUTOMATION_STATUSES, assertAutomationStatusTransition, canTransitionAut
 const trigger: AutomationTriggerDefinition = { id: 'SCHEDULED', version: 1, schemaVersion: 1, runnable: false, timeoutMs: 1000,
   configSchema: z.object({}).strict(), idempotency: 'IDEMPOTENT',
   capability: { configurePermission: 'ADMIN', runtimePrerequisites: [], discordSideEffect: 'NONE' } };
-const action: AutomationActionDefinition = { ...trigger, id: 'STATIC_MESSAGE',
+const action: AutomationActionDefinition = { ...trigger, id: 'STATIC_MESSAGE', runnable: true,
   configSchema: z.object({ message: z.string().max(1000) }).strict(), maxStaticMessageLength: 1000 };
 const config = () => ({ schemaVersion: 1, enabled: true, trigger: { id: trigger.id, version: 1, config: {} },
   actions: [{ id: action.id, version: 1, config: { message: 'hello' } }] });
 const validate = (input: unknown, count = 0) => validateAutomationConfig(input, [trigger], [action], count);
-describe('automation contract only', () => {
-  it('starts with no runnable registrations and fixed safety ceilings', () => {
+describe('versioned automation contracts', () => {
+  it('registers only inert scheduled triggers and two safe executable actions', () => {
     expect(AUTOMATION_TRIGGERS.map(item => item.id)).toEqual(['SCHEDULED']);
     expect(AUTOMATION_ACTIONS.map(item => item.id)).toEqual(['STATIC_MESSAGE', 'STAFF_LOG']);
-    expect([...AUTOMATION_TRIGGERS, ...AUTOMATION_ACTIONS].every(item => item.runnable === false)).toBe(true);
+    expect(AUTOMATION_TRIGGERS.every(item => item.runnable === false)).toBe(true);
+    expect(AUTOMATION_ACTIONS.every(item => item.runnable === true)).toBe(true);
     expect(() => validateAutomationRegistry(AUTOMATION_TRIGGERS, AUTOMATION_ACTIONS)).not.toThrow();
     expect(AUTOMATION_CONFIGURE_PERMISSION).toBe('ADMIN');
     expect(AUTOMATION_LIMITS).toMatchObject({ maxEnabled: 20, maxActions: 2, maxDepth: 2, maxStaticMessageLength: 1000,
@@ -27,6 +28,7 @@ describe('automation contract only', () => {
   it('rejects duplicate, executable, stale-version and unsafe capability definitions', () => {
     expect(() => validateAutomationRegistry([trigger, trigger], [])).toThrow();
     expect(() => validateAutomationRegistry([{ ...trigger, runnable: true as false }], [])).toThrow();
+    expect(() => validateAutomationRegistry([], [{ ...action, runnable: false as true }])).toThrow();
     expect(() => validateAutomationRegistry([{ ...trigger, schemaVersion: 2 }], [])).toThrow();
     expect(() => validateAutomationRegistry([], [{ ...action, capability: { ...action.capability, discordSideEffect: 'SEND_MESSAGE' } }])).toThrow();
   });

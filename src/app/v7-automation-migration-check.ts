@@ -84,6 +84,33 @@ try {
     } catch { await tx.execute(sql.raw('ROLLBACK TO SAVEPOINT v73_fk_review')); }
     await tx.execute(sql.raw('RELEASE SAVEPOINT v73_fk_review'));
     check('followupCompositeFKRejectsWrongGuild', !forgedAttemptAccepted);
+    // Rehearse the exact additive 0017 against the resulting V7.3 schema, including
+    // old LEGACY_INERT rows. No live/public schema or migration journal is touched.
+    const v74 = readFileSync(new URL('../../drizzle/0017_eager_genesis.sql', import.meta.url), 'utf8')
+      .split('--> statement-breakpoint').map(part => part.trim()).filter(Boolean);
+    for (const [index, statement] of v74.entries()) {
+      stage = `v74-statement-${index + 1}`;
+      await tx.execute(sql.raw(statement.replaceAll('"public".', `${name}.`)));
+    }
+    stage = 'verify-v74-upgrade';
+    const dispatchToken = randomUUID();
+    await tx.execute(sql.raw(`UPDATE automation_action_runs SET dispatch_token='${dispatchToken}' WHERE execution_id='${executionId}'`));
+    const tokenRows = await tx.execute(sql.raw(`SELECT dispatch_token FROM automation_action_runs WHERE execution_id='${executionId}'`));
+    check('v74DispatchEvidenceUpgradeWithoutLosingLegacyRuns', tokenRows.rows.length >= 1 &&
+      tokenRows.rows.every(item => item.dispatch_token === dispatchToken));
+    await tx.execute(sql.raw(`UPDATE automation_action_runs SET reconciliation_result='CONFIRMED_SENT',
+      reconciled_by='12345678901234567', reconciled_at=now() WHERE execution_id='${executionId}'`));
+    const reconciled = await tx.execute(sql.raw(`SELECT reconciliation_result,reconciled_by,reconciled_at FROM automation_action_runs WHERE execution_id='${executionId}'`));
+    check('v74ReconciliationMetadataPersisted', reconciled.rows[0]?.reconciliation_result === 'CONFIRMED_SENT' &&
+      reconciled.rows[0]?.reconciled_by === '12345678901234567' && Boolean(reconciled.rows[0]?.reconciled_at));
+    let incompleteAllowed = false;
+    await tx.execute(sql.raw('SAVEPOINT v74_reconciliation_review'));
+    try {
+      await tx.execute(sql.raw(`UPDATE automation_action_runs SET reconciled_at=NULL WHERE execution_id='${executionId}'`));
+      incompleteAllowed = true;
+    } catch { await tx.execute(sql.raw('ROLLBACK TO SAVEPOINT v74_reconciliation_review')); }
+    await tx.execute(sql.raw('RELEASE SAVEPOINT v74_reconciliation_review'));
+    check('v74IncompleteReconciliationRejected', !incompleteAllowed);
   });
 } catch (error) {
   console.error(JSON.stringify({ checks, stage, errorType: error instanceof Error ? error.name : 'unknown',

@@ -868,6 +868,10 @@ export const automationActionRuns = pgTable('automation_action_runs', {
   status: text('status').notNull().default('PENDING'),
   attempts: integer('attempts').notNull().default(0),
   discordMessageId: text('discord_message_id'),
+  dispatchToken: uuid('dispatch_token'),
+  reconciliationResult: text('reconciliation_result'),
+  reconciledBy: text('reconciled_by'),
+  reconciledAt: timestamp('reconciled_at', { withTimezone: true }),
   safeErrorCode: text('safe_error_code'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [
@@ -878,4 +882,6 @@ export const automationActionRuns = pgTable('automation_action_runs', {
   check('automation_action_runs_attempt_check', sql`${table.attempts} BETWEEN 0 AND 5`),
   check('automation_action_runs_message_check', sql`${table.discordMessageId} IS NULL OR ${table.discordMessageId} ~ '^[0-9]{17,20}$'`),
   check('automation_action_runs_error_check', sql`${table.safeErrorCode} IS NULL OR ${table.safeErrorCode} ~ '^[A-Z_]{1,40}$'`),
+  check('automation_action_runs_reconciliation_check', sql`(${table.reconciliationResult} IS NULL AND ${table.reconciledBy} IS NULL AND ${table.reconciledAt} IS NULL) OR
+    (${table.reconciliationResult} IN ('CONFIRMED_SENT','CONFIRMED_NOT_SENT') AND ${table.reconciledBy} ~ '^[0-9]{17,20}$' AND ${table.reconciledAt} IS NOT NULL)`),
 ]);

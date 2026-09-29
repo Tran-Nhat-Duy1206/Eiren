@@ -36,7 +36,7 @@ describe('inert scheduled automation', () => {
     for (const definition of AUTOMATION_ACTIONS) {
       expect(definition.capability.configurePermission).toBe('ADMIN');
       expect(definition.capability.discordSideEffect).toBe('SEND_MESSAGE');
-      expect(definition.runnable).toBe(false);
+      expect(definition.runnable).toBe(true);
     }
     for (const bad of [{ ...action, channelId: 'abc' }, { ...action, message: 'x'.repeat(1001) }, { ...action, extra: true }])
       expect(() => configured(daily('09:00'), bad)).toThrow();
