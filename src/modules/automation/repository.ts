@@ -299,7 +299,7 @@ export class AutomationRepository {
         SELECT id FROM automation_execution_attempts WHERE attempted_at < ${new Date(now.getTime() - 3_600_000)} LIMIT 200)`);
       // Metadata is retained while executions may still be externally referenced; prune only old terminal rows.
       const executions = await tx.execute(sql`DELETE FROM automation_executions WHERE id IN (
-        SELECT id FROM automation_executions WHERE status IN ('SUCCEEDED','SKIPPED','FAILED','UNCERTAIN')
+        SELECT id FROM automation_executions WHERE status IN ('SUCCEEDED','SKIPPED','FAILED')
         AND completed_at < ${new Date(now.getTime() - 90 * 86_400_000)} LIMIT 100)`);
       return { attempts: attempts.rowCount ?? 0, executions: executions.rowCount ?? 0 };
     });

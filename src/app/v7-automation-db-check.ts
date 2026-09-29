@@ -59,7 +59,15 @@ try {
     (await db.select().from(automationExecutionAttempts).where(eq(automationExecutionAttempts.executionId, original.id))).length === 1);
   check('expiredLeaseCannotFinalize', !(await repo.finalizeClaim(a, original.id, oldClaim!.claimToken!, true, at(61))) &&
     (await row(original.id)).status === 'RUNNING');
-  await service.update(actor(a), primary.id, draft(), at(0));
+  check('crossGuildFinalizeAndDeferRejected',
+    !(await repo.finalizeClaim(b, original.id, oldClaim!.claimToken!, true, at(2))) &&
+    !(await repo.deferClaim(b, original.id, oldClaim!.claimToken!, at(2))) && (await row(original.id)).status === 'RUNNING');
+  const changed = { ...draft(), config: { ...draft().config,
+    actions: [{ id: 'STAFF_LOG', version: 1, config: { channelId: owner, message: 'New configured action text' } }] } };
+  await service.update(actor(a), primary.id, changed, at(0));
+  check('historicalActionSnapshotUnchangedAfterEdit',
+    (await db.select().from(automationExecutionActions).where(eq(automationExecutionActions.executionId, original.id)))[0]?.config.message === 'Synthetic' &&
+    (await db.select().from(automationActions).where(eq(automationActions.automationId, primary.id)))[0]?.config.message === 'New configured action text');
   check('staleConfigFinalization', await repo.finalizeClaim(a, original.id, oldClaim!.claimToken!, true, at(2)) &&
     (await row(original.id)).safeErrorCode === 'STALE_CONFIG');
   check('terminalTransitionAndClaimTokenCannotReplay',
@@ -74,6 +82,9 @@ try {
     (await row(epoch.id)).safeErrorCode === 'STALE_CONFIG');
   const pendingDisabled = await queue(a, primary.id, 'pending-module-disable');
   await guildRepo.setModuleState(a, 'automation', false, owner);
+  check('disabledModuleRejectsNewExecution', await rejects(() => queue(a, primary.id, 'disabled-before-enqueue')) &&
+    !(await db.select().from(automationExecutions).where(and(eq(automationExecutions.guildId, a),
+      eq(automationExecutions.triggerKey, 'disabled-before-enqueue')))).length);
   const [pendingDisabledClaim] = await repo.claimDue(at(4));
   check('pendingModuleDisableCannotAuthorize', pendingDisabledClaim?.id === pendingDisabled.id &&
     await repo.finalizeClaim(a, pendingDisabled.id, pendingDisabledClaim.claimToken!, true, at(5)) &&
@@ -113,6 +124,45 @@ try {
     generated[0]?.triggerKey === `scheduled:${at(10).toISOString()}` &&
     !!afterSchedule?.nextRunAt && afterSchedule.nextRunAt > at(86_400));
   check('scheduleDuplicateKey', (await queue(a, scheduleRule.id, `scheduled:${at(10).toISOString()}`)).id === generated[0]?.id);
+  const onceAt = new Date('2025-06-01T12:00:00.000Z');
+  const onceDraft: AutomationRuleDraft = { ...draft(), config: { ...draft().config,
+    trigger: { id: 'SCHEDULED', version: 1, config: { kind: 'once', at: onceAt.toISOString() } } } };
+  const onceGuild = guildIds[6]!;
+  const onceRule = await service.create(actor(onceGuild), onceDraft, new Date('2025-05-31T00:00:00.000Z'));
+  let unlockOnce!: () => void;
+  let onceLockHeld!: () => void;
+  const onceGate = new Promise<void>(resolve => { unlockOnce = resolve; });
+  const onceEntered = new Promise<void>(resolve => { onceLockHeld = resolve; });
+  const onceHolder = db.transaction(async tx => { await tx.execute(sql`SELECT pg_advisory_xact_lock(724099,7303)`); onceLockHeld(); await onceGate; });
+  await onceEntered;
+  const firstGenerator = repo.generateDue(new Date(onceAt.getTime() + 1000));
+  const secondGenerator = repo.generateDue(new Date(onceAt.getTime() + 1000));
+  unlockOnce();
+  await onceHolder;
+  const generatedOnce = [...await firstGenerator, ...await secondGenerator].filter(item => item.automationId === onceRule.id);
+  check('concurrentOnceGenerationExactOccurrence', generatedOnce.length === 1 &&
+    generatedOnce[0]?.triggerKey === `scheduled:${onceAt.toISOString()}` && !(await repo.get(onceGuild, onceRule.id))?.nextRunAt &&
+    (await db.select().from(automationExecutions).where(eq(automationExecutions.automationId, onceRule.id))).length === 1);
+  await service.setEnabled(actor(onceGuild), onceRule.id, false);
+  const onceReenabled = await service.setEnabled(actor(onceGuild), onceRule.id, true);
+  check('pastOnceReenableDoesNotReplay', onceReenabled.nextRunAt === null &&
+    (await repo.generateDue(new Date('2026-01-01T00:00:00.000Z'))).length === 0);
+  const rollbackGuild = guildIds[8]!;
+  const rollbackRule = await service.create(actor(rollbackGuild), draft(), at(0));
+  await db.update(automations).set({ nextRunAt: at(10) }).where(eq(automations.id, rollbackRule.id));
+  const rollbackFunction = `v73_due_reject_${randomUUID().replaceAll('-', '')}`;
+  const rollbackTrigger = `${rollbackFunction}_trigger`;
+  await db.execute(sql.raw(`CREATE FUNCTION "${rollbackFunction}"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced synthetic due rollback'; END $$`));
+  try {
+    await db.execute(sql.raw(`CREATE TRIGGER "${rollbackTrigger}" BEFORE UPDATE OF next_run_at ON automations FOR EACH ROW WHEN (NEW.id = ${rollbackRule.id}) EXECUTE FUNCTION "${rollbackFunction}"()`));
+    check('generationEnqueueAndAdvanceRollBackTogether', await rejects(() => repo.generateDue(at(86_400))) &&
+      (await db.select().from(automationExecutions).where(eq(automationExecutions.automationId, rollbackRule.id))).length === 0 &&
+      (await repo.get(rollbackGuild, rollbackRule.id))?.nextRunAt?.getTime() === at(10).getTime());
+  } finally {
+    await db.execute(sql.raw(`DROP TRIGGER IF EXISTS "${rollbackTrigger}" ON automations`));
+    await db.execute(sql.raw(`DROP FUNCTION IF EXISTS "${rollbackFunction}"()`));
+  }
+  await service.setEnabled(actor(rollbackGuild), rollbackRule.id, false);
   const capacity: { id: number }[] = [];
   for (let i = 0; i < 18; i++) capacity.push(await service.create(actor(a), draft(), at(0)));
   check('enabledCap20', (await service.list(actor(a))).filter(rule => rule.enabled).length === 20 &&
@@ -140,6 +190,17 @@ try {
   check('unsafeActionRunBecomesUncertain', (await row(unsafe.id)).status === 'UNCERTAIN' &&
     (await row(unsafe.id)).safeErrorCode === 'ACTION_OUTCOME_UNKNOWN' &&
     !(await repo.retryFailed(b, unsafe.id, at(86_563))));
+  for (const [index, actionStatus] of (['SUCCEEDED', 'UNCERTAIN'] as const).entries()) {
+    const unsafeGuild = guildIds[index + 3]!;
+    const unsafeRule = await service.create(actor(unsafeGuild), draft(), at(0));
+    const unsafeExecution = await queue(unsafeGuild, unsafeRule.id, `unsafe-${actionStatus}`, at(86_600));
+    const unsafeOwner = (await repo.claimDue(at(86_601))).find(item => item.id === unsafeExecution.id);
+    check(`claimedBeforeAmbiguous${actionStatus}`, Boolean(unsafeOwner?.claimToken));
+    await db.insert(automationActionRuns).values({ executionId: unsafeExecution.id, position: 0, status: actionStatus });
+    await repo.recoverExpired(at(86_662));
+    check(`ambiguous${actionStatus}NeverRetries`, (await row(unsafeExecution.id)).status === 'UNCERTAIN' &&
+      !(await repo.retryFailed(unsafeGuild, unsafeExecution.id, at(86_663))));
+  }
   // Explicitly seed historical attempt metadata to exercise the authoritative sliding windows.
   const rateRule = await service.create(actor(b), draft(), at(0));
   for (let i = 0; i < 10; i++) {
@@ -154,6 +215,28 @@ try {
   }
   check('authoritativeHourRate60', !(await repo.claimDue(at(100_061))).some(item => item.id === ratePending.id));
   check('rateWindowExpires', (await repo.claimDue(at(100_601))).some(item => item.id === ratePending.id));
+  const rateGuild = guildIds[5]!;
+  const quotaRule = await service.create(actor(rateGuild), draft(), at(0));
+  const quotaSource = await queue(rateGuild, quotaRule.id, 'prior-rate-metadata', at(120_000));
+  await db.update(automationExecutions).set({ status: 'SKIPPED' }).where(eq(automationExecutions.id, quotaSource.id));
+  await db.insert(automationExecutionAttempts).values(Array.from({ length: 9 }, () => ({
+    id: randomUUID(), guildId: rateGuild, executionId: quotaSource.id, attemptedAt: at(120_000) })));
+  const quotaA = await queue(rateGuild, quotaRule.id, 'last-slot-A', at(120_001));
+  const quotaB = await queue(rateGuild, quotaRule.id, 'last-slot-B', at(120_001));
+  let releaseRate!: () => void;
+  let rateLockHeld!: () => void;
+  const rateGate = new Promise<void>(resolve => { releaseRate = resolve; });
+  const rateEntered = new Promise<void>(resolve => { rateLockHeld = resolve; });
+  const rateHolder = db.transaction(async tx => { await tx.execute(sql`SELECT pg_advisory_xact_lock(724099,7303)`); rateLockHeld(); await rateGate; });
+  await rateEntered;
+  const firstRateWorker = repo.claimDue(at(120_002));
+  const secondRateWorker = repo.claimDue(at(120_002));
+  releaseRate();
+  await rateHolder;
+  const quotaClaims = [...await firstRateWorker, ...await secondRateWorker].filter(item => item.guildId === rateGuild);
+  check('concurrentFinalMinuteSlotReservedOnce', quotaClaims.length === 1 &&
+    [quotaA.id, quotaB.id].includes(quotaClaims[0]!.id) &&
+    (await db.select().from(automationExecutionAttempts).where(eq(automationExecutionAttempts.guildId, rateGuild))).length === 10);
   // Isolate retry exhaustion from other pending rows using a future timestamp.
   const retries = await queue(b, rateRule.id, 'retry-limit', at(200_000));
   for (let attempt = 1; attempt <= 5; attempt++) {
@@ -193,10 +276,34 @@ try {
   await holder;
   const owners = [...await left, ...await right].filter(item => item.id === one.id);
   check('concurrentAdvisoryLockExactlyOneOwner', owners.length === 1 && (await row(one.id)).attempts === 1);
+  const tokenGuild = guildIds[7]!;
+  const tokenRule = await service.create(actor(tokenGuild), draft(), at(0));
+  const turnover = await queue(tokenGuild, tokenRule.id, 'token-turnover', at(620_000));
+  const tokenA = (await repo.claimDue(at(620_001))).find(item => item.id === turnover.id)!;
+  check('tokenAClaimed', Boolean(tokenA?.claimToken));
+  await repo.recoverExpired(at(620_062));
+  await repo.recoverExpired(at(620_062)); // first bounded batch may recover older, unrelated guild claims
+  check('tokenARecoveredSafely', (await row(turnover.id)).status === 'PENDING');
+  const tokenB = (await repo.claimDue(at(620_093))).find(item => item.id === turnover.id)!;
+  check('staleLeaseOwnerCannotFinalizeOrDefer', Boolean(tokenB?.claimToken && tokenB.claimToken !== tokenA.claimToken) &&
+    !(await repo.finalizeClaim(tokenGuild, turnover.id, tokenA.claimToken!, true, at(620_094))) &&
+    !(await repo.deferClaim(tokenGuild, turnover.id, tokenA.claimToken!, at(620_094))) &&
+    (await row(turnover.id)).claimToken === tokenB.claimToken &&
+    await repo.finalizeClaim(tokenGuild, turnover.id, tokenB.claimToken!, true, at(620_095)) &&
+    (await row(turnover.id)).safeErrorCode === 'CORE_ONLY');
   const historical = await queue(b, other.id, 'soft-delete-history', at(700_000));
   check('softDeleteRetainsExecutionHistory', await service.delete(actor(b), other.id) &&
     !(await repo.get(b, other.id)) && (await row(historical.id)).automationId === other.id &&
     (await db.select().from(automationActions).where(eq(automationActions.automationId, other.id))).length === 1);
+  // An ambiguous external outcome cannot lose its action-run evidence through generic retention.
+  const ambiguousBefore = (await db.select().from(automationActionRuns).where(eq(automationActionRuns.executionId, unsafe.id))).length;
+  await repo.prune(at(9_000_000));
+  check('unreconciledAmbiguityRetainsAuditEvidence', ambiguousBefore === 1 &&
+    (await row(unsafe.id))?.status === 'UNCERTAIN' &&
+    (await db.select().from(automationActionRuns).where(eq(automationActionRuns.executionId, unsafe.id))).length === 1);
+  // Rate metadata must be bound to the execution's own guild, not merely reference two valid rows.
+  check('attemptGuildExecutionCompositeFK', await rejects(() => db.insert(automationExecutionAttempts).values({
+    id: randomUUID(), guildId: a, executionId: historical.id, attemptedAt: at(700_000) })));
 } catch (error) {
   console.error(JSON.stringify({ checks, passedCount: Object.values(checks).filter(Boolean).length,
     errorType: error instanceof Error ? error.name : 'unknown',

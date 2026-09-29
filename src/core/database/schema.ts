@@ -825,6 +825,7 @@ export const automationExecutions = pgTable('automation_executions', {
 }, table => [
   foreignKey({ columns: [table.guildId, table.automationId], foreignColumns: [automations.guildId, automations.id], name: 'automation_executions_guild_automation_fk' }).onDelete('cascade'),
   uniqueIndex('automation_executions_trigger_unique').on(table.guildId, table.automationId, table.triggerKey),
+  uniqueIndex('automation_executions_guild_id_unique').on(table.guildId, table.id),
   index('automation_executions_due_idx').on(table.status, table.nextAttemptAt),
   index('automation_executions_retention_idx').on(table.createdAt),
   check('automation_executions_trigger_check', sql`length(${table.triggerKey}) BETWEEN 1 AND 128`),
@@ -843,6 +844,7 @@ export const automationExecutionAttempts = pgTable('automation_execution_attempt
 }, table => [
   index('automation_execution_attempts_guild_time_idx').on(table.guildId, table.attemptedAt),
   index('automation_execution_attempts_time_idx').on(table.attemptedAt),
+  foreignKey({ columns: [table.guildId, table.executionId], foreignColumns: [automationExecutions.guildId, automationExecutions.id], name: 'automation_execution_attempts_guild_execution_fk' }).onDelete('cascade'),
 ]);
 
 // Execution-owned action definitions are captured when queued, never read from live automation_actions during dispatch.
@@ -855,7 +857,7 @@ export const automationExecutionActions = pgTable('automation_execution_actions'
 }, table => [
   primaryKey({ columns: [table.executionId, table.position] }),
   check('automation_execution_actions_position_check', sql`${table.position} BETWEEN 0 AND 1`),
-  check('automation_execution_actions_kind_check', sql`${table.actionKey} IN ('STATIC_MESSAGE','STAFF_LOG') AND ${table.actionVersion} BETWEEN 1 AND 100`),
+  check('automation_execution_actions_kind_check', sql`${table.actionKey} IN ('STATIC_MESSAGE','STAFF_LOG','LEGACY_INERT') AND ${table.actionVersion} BETWEEN 1 AND 100`),
   check('automation_execution_actions_config_check', sql`jsonb_typeof(${table.config}) = 'object' AND octet_length(${table.config}::text) <= 2048 AND
     (${table.actionKey} <> 'STATIC_MESSAGE' OR length(coalesce(${table.config}->>'text', '')) <= 1000)`),
 ]);
