@@ -102,6 +102,8 @@ async function main() {
     // and every populated public table; this must be a disposable, migration-only database.
     const extraSchemas = await src.query("SELECT nspname FROM pg_namespace WHERE nspname NOT IN ('public', 'drizzle', 'information_schema') AND nspname NOT LIKE 'pg_%'");
     if (extraSchemas.rowCount) fail('source includes an unapproved schema');
+    const extraJournalRelations = await src.query("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'drizzle' AND c.relkind IN ('r', 'p', 'm', 'f') AND c.relname <> '__drizzle_migrations'");
+    if (extraJournalRelations.rowCount) fail('source includes data relations outside the approved migration journal');
     const externalRelations = await src.query("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('f', 'm')");
     if (externalRelations.rowCount) fail('source includes foreign or materialized data');
     if ((await src.query('SELECT EXISTS(SELECT 1 FROM pg_largeobject_metadata LIMIT 1) AS populated')).rows[0]?.populated)
@@ -141,8 +143,8 @@ async function main() {
     await src.query('INSERT INTO guilds (id) VALUES ($1)', [MARKER]);
     await src.query('INSERT INTO guild_settings (guild_id, timezone) VALUES ($1, $2)', [MARKER, 'UTC']);
     stage = 'dump';
-    const pgArgs = container ? ['-U', decodeURIComponent(source.url.username), '--format=custom', '--no-owner', '--no-acl', '--file', artifact, source.name]
-      : ['--host', source.url.hostname, '--port', source.url.port || '5432', '--username', decodeURIComponent(source.url.username), '--format=custom', '--no-owner', '--no-acl', '--file', artifact, source.name];
+    const pgArgs = container ? ['-U', decodeURIComponent(source.url.username), '--format=custom', '--no-owner', '--no-acl', '--no-blobs', '--file', artifact, source.name]
+      : ['--host', source.url.hostname, '--port', source.url.port || '5432', '--username', decodeURIComponent(source.url.username), '--format=custom', '--no-owner', '--no-acl', '--no-blobs', '--file', artifact, source.name];
     await execPg('pg_dump', pgArgs);
     J('synthetic source dumped in custom format');
     stage = 'create empty restore target';
