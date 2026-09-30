@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // V8.1: synthetic, disposable PostgreSQL 17 rehearsal. Never point this at user data.
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -80,8 +80,9 @@ async function main() {
   const execPg = (name, args, output) => container
     ? run('docker', ['exec', '--user', 'postgres', container, name, ...args], cliEnv, output)
     : run(hostTool(name), args, { ...cliEnv, PGPASSWORD: decodeURIComponent(source.url.password) }, output);
-  let src, admin, restored;
-  let directory, artifact, targetCreated = false, markerInserted = false, dumpRemoved = false;
+  let src, admin, adminUrl, restored;
+  let directory, artifact, targetCreateAttempted = false, markerAttempted = false, dumpRemoved = false;
+  const targetOwnershipMarker = randomInt(1_000_000_000, 2_000_000_000);
   try {
     stage = 'source inspection';
     src = await client(source.url);
@@ -103,6 +104,8 @@ async function main() {
     if (extraSchemas.rowCount) fail('source includes an unapproved schema');
     const externalRelations = await src.query("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('f', 'm')");
     if (externalRelations.rowCount) fail('source includes foreign or materialized data');
+    if ((await src.query('SELECT EXISTS(SELECT 1 FROM pg_largeobject_metadata LIMIT 1) AS populated')).rows[0]?.populated)
+      fail('source includes PostgreSQL large objects');
     const publicTables = (await src.query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")).rows;
     if (publicTables.length < 20) fail('source schema inventory is incomplete');
     for (const { tablename } of publicTables) {
@@ -110,7 +113,7 @@ async function main() {
       if ((await src.query(`SELECT EXISTS(SELECT 1 FROM public."${quoted}" LIMIT 1) AS populated`)).rows[0]?.populated)
         fail('source must contain zero records in every public data table');
     }
-    const adminUrl = new URL(source.url);
+    adminUrl = new URL(source.url);
     adminUrl.pathname = '/postgres';
     admin = await client(adminUrl);
     const existing = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [target.name]);
@@ -134,8 +137,8 @@ async function main() {
     }
     J('source migration hashes verified through 0017; all public tables empty; PostgreSQL 17 tools confirmed');
     stage = 'synthetic source marker';
+    markerAttempted = true; // A lost INSERT response is still cleaned up in finally.
     await src.query('INSERT INTO guilds (id) VALUES ($1)', [MARKER]);
-    markerInserted = true;
     await src.query('INSERT INTO guild_settings (guild_id, timezone) VALUES ($1, $2)', [MARKER, 'UTC']);
     stage = 'dump';
     const pgArgs = container ? ['-U', decodeURIComponent(source.url.username), '--format=custom', '--no-owner', '--no-acl', '--file', artifact, source.name]
@@ -144,8 +147,10 @@ async function main() {
     J('synthetic source dumped in custom format');
     stage = 'create empty restore target';
     // target.name is strictly allowlisted; refuse an already-existing database, even if empty.
-    await admin.query(`CREATE DATABASE "${target.name}" TEMPLATE template0`);
-    targetCreated = true;
+    targetCreateAttempted = true;
+    // Mark ownership atomically with CREATE: an acknowledged or lost response can be
+    // reconciled without ever dropping a pre-existing/unrelated database.
+    await admin.query(`CREATE DATABASE "${target.name}" TEMPLATE template0 CONNECTION LIMIT ${targetOwnershipMarker}`);
     stage = 'restore';
     const restoreArgs = container ? ['-U', decodeURIComponent(source.url.username), '--dbname', target.name, '--exit-on-error', '--single-transaction', '--no-owner', '--no-acl', artifact]
       : ['--host', target.url.hostname, '--port', target.url.port || '5432', '--username', decodeURIComponent(target.url.username), '--dbname', target.name, '--exit-on-error', '--single-transaction', '--no-owner', '--no-acl', artifact];
@@ -171,10 +176,29 @@ async function main() {
   } finally {
     stage = 'cleanup';
     cleaning = true;
-    await restored?.end().catch(() => {});
-    if (markerInserted && src) await src.query('DELETE FROM guilds WHERE id = $1', [MARKER]).catch(() => { process.exitCode = 1; });
+    await restored?.end().catch(() => { process.exitCode = 1; });
+    if (markerAttempted) {
+      try { await src.query('DELETE FROM guilds WHERE id = $1', [MARKER]); }
+      catch {
+        // A lost write/connection must not leave the synthetic marker behind.
+        try { const retry = await client(source.url); try { await retry.query('DELETE FROM guilds WHERE id = $1', [MARKER]); } finally { await retry.end(); } }
+        catch { process.exitCode = 1; }
+      }
+    }
     await src?.end().catch(() => { process.exitCode = 1; });
-    if (targetCreated && admin) await admin.query(`DROP DATABASE "${target.name}"`).catch(() => { process.exitCode = 1; });
+    if (targetCreateAttempted) {
+      // CREATE might have committed before its response was lost. Drop only the
+      // database whose unique CREATE-time marker and owner match this invocation.
+      let keeper = admin, reconnect = false;
+      try {
+        let row;
+        try { row = (await keeper.query('SELECT datconnlimit, datdba = (SELECT oid FROM pg_roles WHERE rolname = current_user) AS owned FROM pg_database WHERE datname = $1', [target.name])).rows[0]; }
+        catch { keeper = await client(adminUrl); reconnect = true; row = (await keeper.query('SELECT datconnlimit, datdba = (SELECT oid FROM pg_roles WHERE rolname = current_user) AS owned FROM pg_database WHERE datname = $1', [target.name])).rows[0]; }
+        if (row && (row.datconnlimit !== targetOwnershipMarker || !row.owned)) process.exitCode = 1;
+        else if (row) await keeper.query(`DROP DATABASE "${target.name}"`);
+      } catch { process.exitCode = 1; }
+      finally { if (reconnect) await keeper.end().catch(() => { process.exitCode = 1; }); }
+    }
     await admin?.end().catch(() => { process.exitCode = 1; });
     if (artifact) {
       if (container) await run('docker', ['exec', '--user', 'postgres', container, 'rm', '-f', '--', artifact], cliEnv, undefined, true).then(() => { dumpRemoved = true; }).catch(() => { process.exitCode = 1; });

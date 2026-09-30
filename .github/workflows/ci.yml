@@ -38,9 +38,13 @@ jobs:
       AI_ENABLED: 'false'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
       - name: Enable pinned pnpm through Corepack
         run: |
           corepack enable
