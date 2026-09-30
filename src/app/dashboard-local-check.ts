@@ -2,27 +2,36 @@ import { loadEnv } from '../core/config/env.js';
 import { createDatabase } from '../core/database/connection.js';
 import { createDashboardServer, type DashboardWebDeps } from '../dashboard/web.js';
 
-/** Local, unauthenticated smoke check. Never opens a Discord OAuth route. */
+/** Local HTTP smoke plus synthetic ADMIN page/CSRF checks; never opens Discord OAuth. */
 async function main(): Promise<void> {
   const { pool } = createDatabase(loadEnv().DATABASE_URL);
   let app: Awaited<ReturnType<typeof createDashboardServer>> | undefined;
   const deadline = AbortSignal.timeout(10_000);
   let url: string | undefined;
   let stopServer: ReturnType<typeof setTimeout> | undefined;
-  const checks: Record<string, boolean> = { database: false, healthz: false, login: false, css: false, rootRedirect: false, guildsRedirect: false, restrictiveHeaders: false, secretFree: false };
+  const checks: Record<string, boolean> = { database: false, healthz: false, login: false, css: false, rootRedirect: false, guildsRedirect: false, restrictiveHeaders: false, secretFree: false,
+    automationAdminPage: false, automationOriginCsrf: false, automationCsp: false };
   try {
     const connected = await pool.query('SELECT 1 AS ready');
     checks.database = connected.rows[0]?.ready === 1;
     if (!checks.database) throw new Error('Database connectivity check failed');
 
-    const forbidden = (): never => { throw new Error('Unexpected authenticated or OAuth operation'); };
+    const forbidden = (): never => { throw new Error('Unexpected OAuth or domain mutation'); };
+    const localGuild = '123456789012345678';
+    const localSession = 'v75-local-test-session';
     const deps = {
-      client: {}, services: {}, access: { authorize: forbidden, listAccessible: forbidden }, read: {},
+      client: { guilds: { fetch: async () => ({ id: localGuild, name: 'Local dashboard fixture' }) } },
+      services: { modules: { isEnabled: async () => false }, permissions: { resolve: async () => 'GUILD_OWNER' },
+        automation: { list: async () => [], listRecentExecutions: async () => [] } },
+      access: { authorize: async (guildId: string) => { if (guildId !== localGuild) return forbidden();
+        return { guildId, userId: localGuild, guildOwnerId: localGuild, roleIds: [] }; }, listAccessible: forbidden }, read: {},
       audit: { record: forbidden },
       auth: {
         startOAuth: forbidden, completeOAuth: forbidden, clearStateCookie: forbidden,
-        clearSessionCookie: () => ({ name: 'dashboard_session', value: '', options: { path: '/', httpOnly: true, sameSite: 'lax', secure: false, maxAge: 0 } }), getSession: async () => null,
-        revokeSession: forbidden, csrfToken: forbidden, verifyCsrf: forbidden,
+        clearSessionCookie: () => ({ name: 'dashboard_session', value: '', options: { path: '/', httpOnly: true, sameSite: 'lax', secure: false, maxAge: 0 } }),
+        getSession: async (raw: string) => raw === localSession ? { userId: localGuild, oauthGuildIds: [localGuild],
+          expiresAt: new Date(Date.now() + 60_000), absoluteExpiresAt: new Date(Date.now() + 60_000) } : null,
+        revokeSession: forbidden, csrfToken: () => 'local-csrf', verifyCsrf: (raw: string, csrf: string) => raw === localSession && csrf === 'local-csrf',
       },
       baseUrl: 'http://127.0.0.1/', secureCookies: false, trustProxy: false,
     } as unknown as DashboardWebDeps;
@@ -56,6 +65,20 @@ async function main(): Promise<void> {
       const publicData = body + JSON.stringify([...response.headers]);
       return forbiddenValues.every(value => !publicData.includes(value));
     });
+    const automationUrl = new URL(`/g/${localGuild}/automations`, url);
+    const automationResponse = await fetch(automationUrl, { signal: deadline, headers: { cookie: `dashboard_session=${localSession}` } });
+    const automationHtml = await automationResponse.text();
+    checks.automationAdminPage = automationResponse.status === 200 && automationHtml.includes('Automation module: Disabled') &&
+      automationHtml.includes('/action/automation-create') && automationHtml.includes('/action/automation-module-toggle');
+    checks.automationCsp = (automationResponse.headers.get('content-security-policy') ?? '').includes("script-src 'none'") &&
+      !automationHtml.includes('<script');
+    checks.secretFree &&= forbiddenValues.every(value => !automationHtml.includes(value));
+    const protectedAction = new URL(`/g/${localGuild}/action/automation-create`, url);
+    const blocked = await Promise.all([
+      fetch(protectedAction, { method: 'POST', signal: deadline, headers: { cookie: `dashboard_session=${localSession}`, origin: 'http://127.0.0.1', 'content-type': 'application/x-www-form-urlencoded' }, body: 'csrfToken=invalid' }),
+      fetch(protectedAction, { method: 'POST', signal: deadline, headers: { cookie: `dashboard_session=${localSession}`, origin: 'http://evil.example', 'content-type': 'application/x-www-form-urlencoded' }, body: 'csrfToken=local-csrf' }),
+    ]);
+    checks.automationOriginCsrf = blocked.every(response => response.status === 403);
     console.log(JSON.stringify({ url, checks, redirects: { rootStatus: root.response.status, rootLocation: root.response.headers.get('location'), guildsStatus: guilds.response.status, guildsLocation: guilds.response.headers.get('location') }, passed: Object.values(checks).every(Boolean) }));
     if (!Object.values(checks).every(Boolean)) process.exitCode = 1;
   } catch (error) {

@@ -20,6 +20,9 @@ import type { GiveawayService } from '../modules/giveaways/service.js';
 import type { TempvoiceService } from '../modules/tempvoice/service.js';
 import type { AchievementsService } from '../modules/achievements/service.js';
 import type { AnalyticsService } from '../modules/analytics/service.js';
+import type { AiService } from '../modules/ai/service.js';
+import type { AiRuntime } from '../modules/ai/runtime.js';
+import type { AutomationService } from '../modules/automation/service.js';
 
 export interface Services {
   logger: Logger;
@@ -44,4 +47,7 @@ export interface Services {
   tempvoice: TempvoiceService;
   achievements: AchievementsService;
   analytics: AnalyticsService;
+  ai: AiService;
+  aiRuntime: AiRuntime;
+  automation: AutomationService;
 }

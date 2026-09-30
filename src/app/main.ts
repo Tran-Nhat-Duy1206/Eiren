@@ -1,4 +1,4 @@
-import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
+import { Client, DiscordAPIError, Events, GatewayIntentBits, Partials } from 'discord.js';
 import { and, eq } from 'drizzle-orm';
 import { loadEnv } from '../core/config/env.js';
 import { createDatabase } from '../core/database/connection.js';
@@ -10,7 +10,9 @@ import { guilds, moderationCases, moderatorNotes, verificationSettings, memberVe
   communityEvents, eventParticipants, eventAttendance, eventReminders, giveaways as giveawayRows,
   giveawayEntries, giveawayDraws, giveawayWinners, tempvoiceSettings, tempvoiceRooms, memberAchievements,
   analyticsSettings, analyticsGuildHourly, analyticsChannelHourly, analyticsCommandHourly, analyticsEventDedupe,
-  analyticsMemberState, analyticsActiveVoiceSessions, dashboardSessions, dashboardAuditLog } from '../core/database/schema.js';
+  analyticsMemberState, analyticsActiveVoiceSessions, dashboardSessions, dashboardAuditLog,
+  aiSettings, aiUsageDaily, aiRequests, automations, automationActions, automationExecutions,
+  automationExecutionActions, automationExecutionAttempts, automationActionRuns } from '../core/database/schema.js';
 import { createLogger } from '../core/logger/logger.js';
 import { registerCommands } from '../core/commands/dispatcher.js';
 import { registerComponents, registerSelects } from '../core/components/component.js';
@@ -64,6 +66,13 @@ import { AchievementsService } from '../modules/achievements/service.js';
 import { V5Scheduler, ScheduledStageError } from './v5-scheduler.js';
 import { AnalyticsMaintenanceError, AnalyticsRepository } from '../modules/analytics/repository.js';
 import { AnalyticsService } from '../modules/analytics/service.js';
+import { AiRepository } from '../modules/ai/repository.js';
+import { AiService } from '../modules/ai/service.js';
+import { AiRuntime } from '../modules/ai/runtime.js';
+import { pruneAiMetadata } from '../modules/ai/retention.js';
+import { AutomationRepository } from '../modules/automation/repository.js';
+import { AutomationService } from '../modules/automation/service.js';
+import { createAutomationDiscordGateway } from '../modules/automation/discord-gateway.js';
 import { observedHumanVoice } from '../modules/analytics/voice-snapshot.js';
 import { DashboardAuth } from '../dashboard/auth/dashboard-auth.js';
 import { DashboardAccess } from '../dashboard/access/dashboard-access.js';
@@ -162,6 +171,23 @@ const giveaways = new GiveawayService(new GiveawayRepository(db), permissions, m
 const tempvoice = new TempvoiceService(new TempvoiceRepository(db), permissions, logger,
   async guildId => new DiscordTempvoiceGateway(await client.guilds.fetch(guildId)));
 const analytics = new AnalyticsService(new AnalyticsRepository(db), permissions, modules);
+// V7.2A has explicit AI commands, but no production provider adapter or external inference.
+const ai = new AiService(new AiRepository(db), permissions, env.AI ? {
+  providerId: env.AI.providerId, models: env.AI.models, policy: env.AI.policy,
+  timeoutMs: env.AI.timeoutMs, globalDailyBudgetMicros: env.AI.globalDailyBudgetMicros,
+  globalMonthlyBudgetMicros: env.AI.globalMonthlyBudgetMicros,
+} : null);
+const aiRuntime = new AiRuntime(ai, null); // fail closed until a separately reviewed V7.2B adapter exists
+const automation = new AutomationService(new AutomationRepository(db), permissions, async (guildId, userId) => {
+  const guild = await client.guilds.fetch({ guild: guildId, force: true });
+  try {
+    const member = await guild.members.fetch({ user: userId, force: true }); // Fresh REST membership/roles outside a DB transaction.
+    return { guildId, userId, guildOwnerId: guild.ownerId, roleIds: [...member.roles.cache.keys()] };
+  } catch (error) {
+    if (error instanceof DiscordAPIError && error.code === 10007) return null;
+    throw error;
+  }
+}, logger, createAutomationDiscordGateway(client));
 const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
   baseUrl: env.DASHBOARD.DASHBOARD_BASE_URL, sessionSecret: env.DASHBOARD.DASHBOARD_SESSION_SECRET,
   discordClientId: env.DISCORD_CLIENT_ID, discordClientSecret: env.DASHBOARD.DISCORD_CLIENT_SECRET,
@@ -169,7 +195,7 @@ const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
 });
 let dashboard: Awaited<ReturnType<typeof createDashboardServer>> | undefined;
 const services = { logger, repository, guildConfig, permissions, modules, guildLogs, moderation, verification, antiraid,
-  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements, analytics };
+  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements, analytics, ai, aiRuntime, automation };
 const scheduler = new ModerationScheduler(moderation, async guildId => {
   const guild = await client.guilds.fetch(guildId);
   if (!client.user) throw new Error('Bot not logged in');
@@ -230,6 +256,11 @@ const v5Scheduler = new V5Scheduler([
   { name: 'giveaways', runDue: async () => { await giveaways.runDue(); } },
   { name: 'tempvoice', runDue: async () => { await tempvoice.runDue(); } },
   { name: 'analytics', runDue: analyticsDue },
+  { name: 'automation', runDue: async () => { await automation.runDue(); } },
+  { name: 'ai-maintenance', runDue: async () => {
+    const result = await pruneAiMetadata(db);
+    logger.debug({ job: 'ai-maintenance', ...result }, 'AI metadata maintenance complete');
+  } },
 ], logger);
 let retentionTimer: NodeJS.Timeout | undefined;
 async function pruneHistory() {
@@ -284,6 +315,15 @@ const lifecycle = createBotLifecycle({
     await db.select({ id: analyticsEventDedupe.guildId }).from(analyticsEventDedupe).limit(1);
     await db.select({ id: analyticsMemberState.guildId }).from(analyticsMemberState).limit(1);
     await db.select({ id: analyticsActiveVoiceSessions.guildId }).from(analyticsActiveVoiceSessions).limit(1);
+    await db.select({ id: aiSettings.guildId }).from(aiSettings).limit(1);
+    await db.select({ id: aiUsageDaily.guildId }).from(aiUsageDaily).limit(1);
+    await db.select({ id: aiRequests.id }).from(aiRequests).limit(1);
+    await db.select({ id: automations.id }).from(automations).limit(1);
+    await db.select({ id: automationActions.automationId }).from(automationActions).limit(1);
+    await db.select({ id: automationExecutions.id }).from(automationExecutions).limit(1);
+    await db.select({ id: automationExecutionActions.executionId }).from(automationExecutionActions).limit(1);
+    await db.select({ id: automationExecutionAttempts.id }).from(automationExecutionAttempts).limit(1);
+    await db.select({ id: automationActionRuns.executionId }).from(automationActionRuns).limit(1);
     if (dashboardAuth) {
       await db.select({ id: dashboardSessions.tokenHash }).from(dashboardSessions).limit(1);
       await db.select({ id: dashboardAuditLog.id }).from(dashboardAuditLog).limit(1);
@@ -329,6 +369,7 @@ const lifecycle = createBotLifecycle({
     if (retentionTimer) clearInterval(retentionTimer);
     await dashboard?.close();
     await analyticsReconcile;
+    await aiRuntime.stop();
     await scheduler.stop(); await v5Scheduler.stop(); await pool.end();
   },
 });
