@@ -18,6 +18,7 @@
     "db:migrate": "tsx src/app/migrate.ts",
     "db:check": "drizzle-kit check",
     "db:smoke": "tsx src/app/db-smoke.ts",
+    "db:restore-rehearsal": "node scripts/restore-rehearsal.mjs",
     "db:v4": "tsx src/app/v4-db-check.ts",
     "db:v5": "tsx src/app/v5-db-check.ts",
     "db:v6": "tsx src/app/v6-db-check.ts",

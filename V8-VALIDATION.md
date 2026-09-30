@@ -1,0 +1,25 @@
+# V8.1 validation ledger — Policy & Repeatability
+
+**Scope:** V8.1 engineering gate only. Start from `main` `0a25461f26951659d41ee00dbe8a3bb472962ee4`, via approved `design/v8` `482b560772eadfe215cd506a5d54c683badeb636`, on `feature/v8-data-ops`. See `V0-VALIDATION.md` through `V7-VALIDATION.md` for prior, separately bounded observations; the 445-test, V6 69, V7 189 and dashboard 11 counts were a V7 baseline, not evidence of a new CI run.
+
+## Scope and safety contract
+
+- Added `.github/workflows/ci.yml`, a single explicit `pnpm db:restore-rehearsal` script, [`V8-POLICY.md`](V8-POLICY.md), and [`docs/RECOVERY.md`](docs/RECOVERY.md); updated the phase text in `V8-DESIGN.md` to distinguish the V8.1 **synthetic** restore proof from V8.6 operator recovery. `package.json` gained only the restore tooling entry. No npm dependency, schema change, production runtime behavior, migration, retention/redaction, new intent, V8.5 UI, AI provider or Automation action is in scope.
+- GitHub Actions: `pull_request`, `push` to `main`/`feature/**`, read-only `contents: read`, Ubuntu 24.04, Node 24, pinned Corepack pnpm 10.28.2, ephemeral PostgreSQL 17, 35-minute job bound, synthetic DB and fake-shaped Discord identifiers. Dashboard/AI/GuildMembers optional flags disabled. No `secrets.*`, Discord login/REST send/registration, OAuth, bot start or live Automation script.
+- The fresh DB step asserts zero public tables **before** first `pnpm db:migrate`; source migration journal must contain exactly 18 ordered entries with matching SQL hashes through 0017 and zero rows in every public data table before the rehearsal. Commands run sequentially: `pnpm typecheck`, `pnpm test`, `pnpm build`, `pnpm db:check`, `pnpm db:migrate`, `pnpm db:smoke`, `pnpm db:v4`, `pnpm db:v5`, `pnpm db:v6`, `pnpm db:v7`, `pnpm dashboard:check`, then `pnpm db:restore-rehearsal`.
+- `db:smoke` rolls back its fixture. V4–V7 PostgreSQL drivers use synthetic guilds and remove fixtures; the V7 migration-upgrade test uses a disposable schema, while the migration journal is intentional persistent bootstrap metadata. `dashboard:check` binds a temporary loopback server with synthetic auth, shuts it down, and does not authenticate a real browser. Each stage is job-bounded; restore CLI child tools/DB connections are individually bounded. Review the exact run if a test fails or an orphan fixture remains.
+
+## Actual validation results (fill from observed runs; do not infer)
+
+| Check | Observation |
+| --- | --- |
+| Local typecheck, test count, build, db:check | **PASS**: `pnpm typecheck`, `pnpm test` **445/445 in 55 files**, `pnpm build`, `pnpm db:check`. |
+| Local PostgreSQL migrate/smoke/db:v4/db:v5/db:v6/db:v7 | **PASS**: `pnpm db:migrate`, `pnpm db:smoke`, `pnpm db:v4` **26 checks**, `pnpm db:v5` **31**, `pnpm db:v6` **69**, `pnpm db:v7` **189** across its foundation/retention/fake-provider/Automation/upgrade/actions/dashboard drivers. Existing configured local DB was already migrated; this local pass did not independently prove a cold upgrade (CI and a separate isolated local rehearsal do). |
+| Local dashboard check | **PASS**: `pnpm dashboard:check` **11/11**, bounded loopback port and server shutdown. |
+| Isolated PostgreSQL 17 restore rehearsal: source 0000–0017, distinct target, dump, restore, journal/FK/marker, restored smoke, cleanup | **PASS (local PG 17.11)**: separate disposable UTF-8 PG17 cluster initialized with fake user; created empty `eiren_v8_synthetic_final`, applied `0000`–`0017`, then `pnpm db:restore-rehearsal` checked exact 18 ordered migration timestamps/SQL hashes and zero public data rows, inserted fake guild marker, used PG17 `pg_dump` to custom archive, created distinct `eiren_restore_local_final`, restored with PG17 `pg_restore`, checked ordered journal, representative tables/FK/marker, ran restored rollback-only smoke, removed source marker, restore DB and archive. Temporary local cluster was stopped and removed; no real guild data or credentials entered the isolated instance. Initial attempt with default WIN1252 cluster encoding failed cold migration on a Unicode character; reinitialized **the owned disposable cluster** as UTF-8 and the final full rehearsal passed. |
+| Real GitHub Actions `feature/v8-data-ops` run URL and conclusion | Pending. YAML review alone cannot satisfy this gate. |
+| Final diff/secret/migration/runtime audit and clean tree | Pending. |
+
+## Evidence boundaries
+
+A green CI cold migrate and synthetic restore proves repeatability of **this** migration set and basic schema/constraint access on a disposable database; it does not establish a secure encrypted/off-host production backup, operator recovery point/time, deletion replay, readiness, deployment TLS/reverse proxy, native Windows signal delivery, real Discord sends, human OAuth mutations, AI provider traffic or privacy-law compliance. Current `/healthz` is liveness only. V8.2 data-policy authority/windows/holds and V8.6 operational recovery remain unapproved; V8.5 presentation remains unimplemented. Do not reinterpret an absent real-user test as a pass.
