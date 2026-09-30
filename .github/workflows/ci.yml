@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: eiren
+          POSTGRES_PASSWORD: eiren_ci_only
+          POSTGRES_DB: eiren
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U eiren -d eiren"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 6
+    env:
+      DATABASE_URL: postgresql://eiren:eiren_ci_only@127.0.0.1:5432/eiren
+      DISCORD_TOKEN: synthetic-ci-token-never-used
+      DISCORD_CLIENT_ID: '990000000000000001'
+      LOG_LEVEL: error
+      ENABLE_GUILD_MEMBERS_INTENT: 'false'
+      DASHBOARD_ENABLED: 'false'
+      AI_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Bootstrap pinned pnpm for setup-node cache
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.28.2 --activate
+          pnpm --version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install dependencies from lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Enforce synthetic-only validation environment
+        run: |
+          node --input-type=module -e '
+            import { existsSync } from "node:fs";
+            if (existsSync(".env") || process.env.DISCORD_TOKEN !== "synthetic-ci-token-never-used" ||
+                process.env.DISCORD_CLIENT_ID !== "990000000000000001" ||
+                process.env.AI_ENABLED !== "false" || process.env.DASHBOARD_ENABLED !== "false" ||
+                process.env.DISCORD_DEV_GUILD_ID ||
+                ["AI_API_KEY", "DISCORD_CLIENT_SECRET", "DASHBOARD_SESSION_SECRET"].some(name => process.env[name]))
+              throw new Error("CI must use only synthetic offline credentials");
+            console.log("Synthetic-only settings verified; no real guild or service credential configured");
+          '
+      - name: Prove source database is empty
+        run: |
+          node --input-type=module -e '
+            import pg from "pg";
+            const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+            try {
+              await client.connect();
+              const result = await client.query("SELECT count(*)::int AS count FROM information_schema.tables WHERE table_schema = $1", ["public"]);
+              if (result.rows[0]?.count !== 0) throw new Error("Expected a fresh empty CI PostgreSQL database");
+              console.log("Fresh PostgreSQL 17 source: no public tables");
+            } finally { await client.end(); }
+          '
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Unit and service tests
+        run: pnpm test
+      - name: Build
+        run: pnpm build
+      - name: Check migration files
+        run: pnpm db:check
+      - name: Apply migrations 0000 through 0017 to fresh database
+        run: pnpm db:migrate
+      - name: PostgreSQL schema and rollback smoke
+        run: pnpm db:smoke
+      - name: V4 PostgreSQL validation
+        run: pnpm db:v4
+      - name: V5 PostgreSQL validation
+        run: pnpm db:v5
+      - name: V6 PostgreSQL validation
+        run: pnpm db:v6
+      - name: V7 PostgreSQL validation
+        run: pnpm db:v7
+      - name: Dashboard loopback smoke
+        run: pnpm dashboard:check
+      - name: Isolated synthetic PostgreSQL 17 restore rehearsal
+        env:
+          RESTORE_DATABASE_URL: postgresql://eiren:eiren_ci_only@127.0.0.1:5432/eiren_restore_ci
+          RESTORE_REHEARSAL_CONFIRM: isolated-synthetic-only
+          RESTORE_PG17_CONTAINER: ${{ job.services.postgres.id }}
+        run: pnpm db:restore-rehearsal

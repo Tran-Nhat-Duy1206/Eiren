@@ -7,7 +7,7 @@ coverage/
 logs/
 *.log
 *.log.*
-data/
+/data/
 pgdata/
 .local/
 secrets/
