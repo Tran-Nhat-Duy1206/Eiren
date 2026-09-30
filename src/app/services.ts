@@ -22,6 +22,7 @@ import type { AchievementsService } from '../modules/achievements/service.js';
 import type { AnalyticsService } from '../modules/analytics/service.js';
 import type { AiService } from '../modules/ai/service.js';
 import type { AiRuntime } from '../modules/ai/runtime.js';
+import type { AutomationService } from '../modules/automation/service.js';
 
 export interface Services {
   logger: Logger;
@@ -48,4 +49,5 @@ export interface Services {
   analytics: AnalyticsService;
   ai: AiService;
   aiRuntime: AiRuntime;
+  automation: AutomationService;
 }

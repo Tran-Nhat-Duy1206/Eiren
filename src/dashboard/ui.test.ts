@@ -93,6 +93,86 @@ describe('dashboard server-rendered UI', () => {
     expect(css).toMatch(/@media\(max-width:700px\)/);
     expect(css).toMatch(/overflow-x:auto/);
     expect(css).toMatch(/focus-visible/);
+    expect(css).toContain('textarea:focus-visible');
+    expect(css).toContain('input,select,textarea{');
     expect(renderLogin()).toContain('href="#main"');
+  });
+});
+
+import { renderAutomationDashboard, type AutomationDashboardView } from './automation-ui.js';
+
+const bad = `<img src=x onerror="boom">@everyone & 'hello'`;
+const now = new Date('2026-01-02T03:04:05Z');
+const data: AutomationDashboardView = {
+  moduleEnabled: false,
+  channels: [{ id: '1', name: bad }],
+  rules: [{ id: 4, name: bad, enabled: true, triggerKey: 'SCHEDULED', triggerConfig: { kind: 'daily', time: '09:00', timezone: 'UTC' }, timezone: 'UTC', nextRunAt: now, configVersion: 2, updatedAt: now, actionKeys: ['STATIC_MESSAGE', 'STAFF_LOG'] }],
+  selected: { id: 4, name: bad, enabled: true, triggerKey: 'DAILY', triggerVersion: 1, triggerConfig: { kind: 'daily', time: '09:00', timezone: 'UTC' }, timezone: 'UTC', cooldownSeconds: 5, nextRunAt: now, configVersion: 2, authorizedBy: bad, updatedAt: now, actions: [{ position: 0, actionKey: 'STATIC_MESSAGE', actionVersion: 1, config: { channelId: '1', message: bad } }, { position: 1, actionKey: 'STAFF_LOG', actionVersion: 1, config: { channelId: 'missing', message: bad } }] },
+  executions: [{ id: 'e1', automationId: 4, automationName: bad, triggerKey: 'DAILY', status: 'UNCERTAIN', attempts: 1, createdAt: now, completedAt: null, safeErrorCode: 'UNKNOWN', configVersion: 2, moduleEpoch: 1 }],
+  selectedExecution: { id: 'e1', automationId: 4, automationName: bad, triggerKey: 'DAILY', status: 'UNCERTAIN', attempts: 1, createdAt: now, completedAt: null, safeErrorCode: 'UNKNOWN', configVersion: 2, moduleEpoch: 1, actions: [{ position: 0, actionKey: 'STATIC_MESSAGE', actionVersion: 1, status: 'UNCERTAIN', attempts: 1, discordMessageId: null, safeErrorCode: 'UNKNOWN', updatedAt: now, reconciliationResult: null, reconciledBy: null, reconciledAt: null }], reconciliation: [{ position: 0, allowSent: true, allowNotSent: false }] },
+};
+
+describe('automation dashboard', () => {
+  it('escapes names, channels, messages and renders selected two-action state', () => {
+    const html = renderAutomationDashboard({ guildId: '123', csrfToken: bad, data });
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('onerror="boom"');
+    expect(html).toContain('&lt;img');
+    expect(html).toContain('@everyone');
+    expect(html).toContain('name="action0ChannelId"');
+    expect(html).toContain('value="1" selected');
+    expect(html).toContain('name="action1Type"');
+    expect(html).toContain('value="STAFF_LOG" selected');
+    expect(html).toContain('name="action1ChannelId"');
+    expect(html).toContain('value="missing" selected');
+    expect(html).toContain('maxlength="1000"');
+    expect(html).toContain('name="scheduleKind"');
+    expect(html).toContain('value="daily" selected');
+    expect(html).toContain('2026-01-02T03:04:05.000Z');
+    expect(html).toContain('Authorized by:');
+    expect(html).toContain('Automation module: Disabled');
+    expect(html).toContain('Daily 09:00 UTC');
+    expect(html).toContain('value="09:00"');
+    expect(html).toContain('value="missing" selected disabled');
+  });
+  it('prepopulates a one-time UTC schedule and defaults new rules to disabled', () => {
+    const once = { ...data, selected: { ...data.selected!, triggerConfig: { kind: 'once', at: '2027-01-01T00:00:00.000Z' } } };
+    const edit = renderAutomationDashboard({ guildId: '123', csrfToken: 'csrf', data: once });
+    expect(edit).toContain('value="once" selected');
+    expect(edit).toContain('value="2027-01-01T00:00:00.000Z"');
+    expect(edit).toContain('Once 2027-01-01T00:00:00.000Z UTC');
+    const create = renderAutomationDashboard({ guildId: '123', csrfToken: 'csrf', data: { ...data, selected: null } });
+    expect(create).toContain('value="false" selected>No');
+  });
+  it('keeps all Discord-sized eligible channel options available without stale selections', () => {
+    const channels = Array.from({ length: 101 }, (_, index) => ({ id: String(index + 1), name: `channel-${index + 1}` }));
+    const html = renderAutomationDashboard({ guildId: '123', csrfToken: 'csrf', data: { ...data, channels, selected: null } });
+    expect(html).toContain('<option value="101">#channel-101</option>');
+  });
+  it('shows exact POST actions, CSRF and confirmations without retry controls', () => {
+    const html = renderAutomationDashboard({ guildId: '123', csrfToken: 'csrf', data });
+    for (const action of ['automation-update', 'automation-disable', 'automation-delete', 'automation-reconcile-sent', 'automation-module-toggle']) {
+      expect(html).toContain(`/action/${action}`);
+    }
+    expect(html).not.toContain('/action/automation-reconcile-not-sent');
+    expect(html).toContain('name="automationId" value="4"');
+    expect(html).toContain('name="executionId" value="e1"');
+    expect(html).toContain('name="position" value="0"');
+    expect(html).toContain('name="confirm" value="yes" required');
+    expect(html).toContain('name="module" value="automation"');
+    expect(html).toContain('name="csrfToken" value="csrf"');
+    expect(html).toContain('The bot cannot determine whether Discord accepted this message. It will not resend automatically.');
+    expect(html).not.toMatch(/Run now|Retry|Test send/i);
+  });
+  it('shows create inputs and gates navigation and content by ADMIN', () => {
+    const create = renderAutomationDashboard({ guildId: '123', csrfToken: 'csrf', data: { ...data, selected: null, selectedExecution: null } });
+    expect(create).toContain('/action/automation-create');
+    for (const field of ['name', 'scheduleKind', 'dailyTime', 'onceAt', 'timezone', 'cooldownSeconds', 'enabled', 'action0Type', 'action0ChannelId', 'action0Message', 'action1Type', 'action1ChannelId', 'action1Message']) expect(create).toContain(`name="${field}"`);
+    const member = renderPage({ page: 'overview', guildId: '123', guildName: 'Guild', csrfToken: 'csrf', actorLevel: 'MEMBER' });
+    expect(member).not.toContain('/automations');
+    const admin = renderPage({ page: 'automations', guildId: '123', guildName: 'Guild', csrfToken: 'csrf', actorLevel: 'ADMIN', data });
+    expect(admin).toContain('href="/g/123/automations" aria-current="page"');
+    expect(admin).toContain('/action/automation-update');
+    expect(renderPage({ page: 'automations', guildId: '123', guildName: 'Guild', csrfToken: 'csrf', actorLevel: 'MEMBER', data })).not.toContain('/action/automation-update');
   });
 });

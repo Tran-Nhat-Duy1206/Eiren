@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq, gt, inArray, isNull, lt, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, lt, lte, sql } from 'drizzle-orm';
 import type { Database } from '../../core/database/connection.js';
 import { automations, automationActions, automationExecutions, automationExecutionActions, automationExecutionAttempts, automationActionRuns, guilds, guildModules } from '../../core/database/schema.js';
 import { AppError } from '../../core/errors/errors.js';
@@ -28,6 +28,31 @@ function validate(input: AutomationRuleInput) {
   if (input.triggerId !== 'SCHEDULED' || (input.triggerConfig.kind === 'daily' && input.triggerConfig.timezone !== input.timezone)) bad('Invalid scheduled timezone');
   const capability = input.actions.every(action => action.id === 'STAFF_LOG') ? 'STAFF_LOG' : 'SEND_MESSAGE';
   if (input.approvedCapability !== capability) bad('Invalid approved capability');
+}
+export type AutomationExecutionSummary = Readonly<{
+  id: string; automationId: number; automationName: string; triggerKey: string; status: string;
+  attempts: number; createdAt: Date; completedAt: Date | null; safeErrorCode: string | null;
+  configVersion: number; moduleEpoch: number;
+}>;
+export type AutomationExecutionAction = Readonly<{
+  position: number; actionKey: string; actionVersion: number; status: string; attempts: number;
+  discordMessageId: string | null; safeErrorCode: string | null; updatedAt: Date | null;
+  reconciliationResult: string | null; reconciledBy: string | null; reconciledAt: Date | null;
+}>;
+export type AutomationExecutionDetail = AutomationExecutionSummary & Readonly<{
+  actions: readonly AutomationExecutionAction[];
+  reconciliation: readonly Readonly<{ position: number; allowSent: boolean; allowNotSent: boolean }>[];
+}>;
+const executionColumns = {
+  id: automationExecutions.id, automationId: automationExecutions.automationId,
+  automationName: automations.name, triggerKey: automationExecutions.triggerKey,
+  status: automationExecutions.status, attempts: automationExecutions.attempts,
+  createdAt: automationExecutions.createdAt, completedAt: automationExecutions.completedAt,
+  safeErrorCode: automationExecutions.safeErrorCode, configVersion: automationExecutions.configVersion,
+  moduleEpoch: automationExecutions.moduleEpoch,
+};
+function executionSummary(row: Omit<AutomationExecutionSummary, 'automationName'> & { automationName: string | null }): AutomationExecutionSummary {
+  return { ...row, automationName: row.automationName ?? `Deleted automation #${row.automationId}` };
 }
 export class AutomationRepository {
   constructor(private readonly db: Database) {}
@@ -65,7 +90,63 @@ export class AutomationRepository {
     return { ...rule, actions };
   }
   async list(guildId: string) {
-    return this.db.select().from(automations).where(and(eq(automations.guildId, guildId), isNull(automations.deletedAt))).orderBy(automations.id).limit(100);
+    const rules = await this.db.select().from(automations)
+      .where(and(eq(automations.guildId, guildId), isNull(automations.deletedAt))).orderBy(automations.id).limit(100);
+    if (!rules.length) return [];
+    const actions = await this.db.select({ automationId: automationActions.automationId, actionKey: automationActions.actionKey })
+      .from(automationActions).where(inArray(automationActions.automationId, rules.map(rule => rule.id)))
+      .orderBy(automationActions.automationId, automationActions.position);
+    return rules.map(rule => ({ ...rule, actionKeys: actions.filter(action => action.automationId === rule.id).map(action => action.actionKey) }));
+  }
+  async listRecentExecutions(guildId: string, automationId?: number, limit = 50): Promise<AutomationExecutionSummary[]> {
+    if (automationId !== undefined && (!Number.isSafeInteger(automationId) || automationId < 1) ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 100) bad('Invalid execution history query');
+    const rows = await this.db.select(executionColumns).from(automationExecutions)
+      .leftJoin(automations, and(eq(automations.id, automationExecutions.automationId), eq(automations.guildId, automationExecutions.guildId)))
+      .where(and(eq(automationExecutions.guildId, guildId), automationId === undefined ? undefined : eq(automationExecutions.automationId, automationId)))
+      .orderBy(desc(automationExecutions.createdAt), desc(automationExecutions.id)).limit(limit);
+    return rows.map(executionSummary);
+  }
+  async inspectExecution(guildId: string, executionId: string): Promise<AutomationExecutionDetail | null> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(executionId)) bad('Invalid execution identifier');
+    const [row] = await this.db.select(executionColumns).from(automationExecutions)
+      .leftJoin(automations, and(eq(automations.id, automationExecutions.automationId), eq(automations.guildId, automationExecutions.guildId)))
+      .where(and(eq(automationExecutions.guildId, guildId), eq(automationExecutions.id, executionId)));
+    if (!row) return null;
+    const snapshots = await this.db.select({ position: automationExecutionActions.position,
+      actionKey: automationExecutionActions.actionKey, actionVersion: automationExecutionActions.actionVersion,
+      status: automationActionRuns.status, attempts: automationActionRuns.attempts,
+      discordMessageId: automationActionRuns.discordMessageId, safeErrorCode: automationActionRuns.safeErrorCode,
+      updatedAt: automationActionRuns.updatedAt, reconciliationResult: automationActionRuns.reconciliationResult,
+      reconciledBy: automationActionRuns.reconciledBy, reconciledAt: automationActionRuns.reconciledAt })
+      .from(automationExecutionActions).leftJoin(automationActionRuns,
+        and(eq(automationActionRuns.executionId, automationExecutionActions.executionId),
+          eq(automationActionRuns.position, automationExecutionActions.position)))
+      .where(eq(automationExecutionActions.executionId, executionId)).orderBy(automationExecutionActions.position);
+    const actions: AutomationExecutionAction[] = snapshots.map(action => ({
+      position: action.position, actionKey: action.actionKey, actionVersion: action.actionVersion,
+      status: action.status ?? 'PENDING', attempts: action.attempts ?? 0,
+      discordMessageId: action.discordMessageId, safeErrorCode: action.safeErrorCode,
+      updatedAt: action.updatedAt, reconciliationResult: action.reconciliationResult,
+      reconciledBy: action.reconciledBy, reconciledAt: action.reconciledAt,
+    }));
+    const reconciliation: { position: number; allowSent: boolean; allowNotSent: boolean }[] = [];
+    if (row.status === 'UNCERTAIN') for (const action of actions) {
+      const earlierSent = actions.filter(item => item.position < action.position).every(item =>
+        item.status === 'SUCCEEDED' && !!item.discordMessageId);
+      const otherSafe = actions.every(item => item.position === action.position ||
+        !['RUNNING', 'UNCERTAIN', 'FAILED', 'SKIPPED'].includes(item.status));
+      const allowSent = !action.reconciliationResult && (
+        action.status === 'UNCERTAIN' ||
+        action.status === 'SUCCEEDED' && !!action.discordMessageId && earlierSent && otherSafe);
+      const allowNotSent = !action.reconciliationResult && (
+        action.status === 'UNCERTAIN' ||
+        action.position > actions[0]!.position && action.status === 'PENDING' && earlierSent &&
+          !actions.some(item => item.status === 'RUNNING' || item.status === 'UNCERTAIN' ||
+            item.position >= action.position && item.status !== 'PENDING'));
+      if (allowSent || allowNotSent) reconciliation.push({ position: action.position, allowSent, allowNotSent });
+    }
+    return { ...executionSummary(row), actions, reconciliation };
   }
   async update(guildId: string, id: number, authorizedBy: string, input: AutomationRuleInput) {
     validate(input);

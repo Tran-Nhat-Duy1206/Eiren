@@ -5,7 +5,7 @@ import { ScheduledStageError } from '../../app/v5-scheduler.js';
 import { AUTOMATION_ACTIONS, AUTOMATION_TRIGGERS, AUTOMATION_LIMITS } from './contracts.js';
 import { validateAutomationConfig, type AutomationConfig } from './config.js';
 import { nextScheduledOccurrence, type ScheduledConfig } from './schedule.js';
-import type { AutomationRepository, AutomationRuleInput } from './repository.js';
+import type { AutomationRepository, AutomationRuleInput, AutomationExecutionSummary, AutomationExecutionDetail } from './repository.js';
 import type { AutomationDiscordGateway } from './discord-gateway.js';
 import { createAutomationActionHandlerRegistry, resolveAutomationActionHandler } from './executor.js';
 import { ZodError } from 'zod';
@@ -68,6 +68,18 @@ export class AutomationService {
   async list(actor: Actor) {
     await this.permissions.require(actor, 'ADMIN');
     return this.repository.list(actor.guildId);
+  }
+  async listRecentExecutions(actor: Actor, automationId?: number, limit = 50): Promise<AutomationExecutionSummary[]> {
+    await this.permissions.require(actor, 'ADMIN');
+    return this.repository.listRecentExecutions(actor.guildId, automationId, limit);
+  }
+  async inspectExecution(actor: Actor, executionId: string): Promise<AutomationExecutionDetail> {
+    await this.permissions.require(actor, 'ADMIN');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(executionId))
+      throw new AppError('VALIDATION', 'Invalid execution identifier');
+    const execution = await this.repository.inspectExecution(actor.guildId, executionId);
+    if (!execution) throw new AppError('NOT_FOUND', 'Automation execution not found');
+    return execution;
   }
   async update(actor: Actor, id: number, draft: AutomationRuleDraft, now = new Date()) {
     await this.permissions.require(actor, 'ADMIN');

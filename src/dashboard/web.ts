@@ -5,6 +5,8 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
 import { PermissionFlagsBits, type Client } from 'discord.js';
+import { assertAutomationTargets, eligibleAutomationChannels, parseAutomationDraft } from './automation-management.js';
+import type { AutomationDashboardView } from './automation-ui.js';
 import type { Services } from '../app/services.js';
 import type { Actor, PermissionLevel } from '../core/permissions/permission-service.js';
 import type { ModerationGateway } from '../modules/moderation/service.js';
@@ -16,9 +18,9 @@ import { renderLogin, renderGuildPicker, renderPage, dashboardCss } from './ui.j
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const numberId = z.coerce.number().int().positive().safe();
-const pages = ['overview', 'moderation', 'members', 'roles', 'tickets', 'suggestions', 'levels', 'events', 'giveaways', 'analytics', 'settings'] as const;
+const pages = ['overview', 'moderation', 'members', 'roles', 'tickets', 'suggestions', 'levels', 'events', 'giveaways', 'analytics', 'automations', 'settings'] as const;
 type Page = typeof pages[number];
-const pageLevel: Record<Page, PermissionLevel> = { overview: 'HELPER', moderation: 'MODERATOR', members: 'HELPER', roles: 'ADMIN', tickets: 'HELPER', suggestions: 'HELPER', levels: 'HELPER', events: 'HELPER', giveaways: 'HELPER', analytics: 'HELPER', settings: 'ADMIN' };
+const pageLevel: Record<Page, PermissionLevel> = { overview: 'HELPER', moderation: 'MODERATOR', members: 'HELPER', roles: 'ADMIN', tickets: 'HELPER', suggestions: 'HELPER', levels: 'HELPER', events: 'HELPER', giveaways: 'HELPER', analytics: 'HELPER', automations: 'ADMIN', settings: 'ADMIN' };
 const pageModule: Partial<Record<Page, string>> = { moderation: 'moderation', tickets: 'tickets', suggestions: 'suggestions', levels: 'levels', events: 'events', giveaways: 'giveaways' };
 type CookieValue = ReturnType<DashboardAuth['clearSessionCookie']>;
 type Session = NonNullable<Awaited<ReturnType<DashboardAuth['getSession']>>>;
@@ -37,6 +39,10 @@ export interface DashboardWebDeps {
   logger?: { error(data: unknown, message?: string): void };
 }
 const bodySchema = z.record(z.string(), z.union([z.string().max(500), z.undefined()]));
+// Only static Automation message fields need 1,000 characters; all other dashboard forms retain 500.
+const automationBodySchema = z.record(z.string().max(40), z.union([z.string().max(1_000), z.undefined()]))
+  .refine(value => Object.keys(value).length <= 20, 'Too many Automation fields');
+const automationMutation = new Set(['automation-create', 'automation-update']);
 const actions: Record<string, { level: PermissionLevel; page: Page; module?: string; execute: (d: DashboardWebDeps, guildId: string, actor: Actor, b: Record<string, string>) => Promise<unknown>; target?: string }> = {
   'module-toggle': { level: 'ADMIN', page: 'settings', execute: (d, g, a, b) => d.services.modules.setEnabled(g, z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/).parse(b.module), z.enum(['true', 'false']).parse(b.enabled) === 'true', a.userId), target: 'module' },
   'guild-timezone': { level: 'ADMIN', page: 'settings', execute: (d, g, _a, b) => d.services.guildConfig.update(g, 'timezone', z.string().min(1).max(64).parse(b.timezone)) },
@@ -48,6 +54,34 @@ const actions: Record<string, { level: PermissionLevel; page: Page; module?: str
   'giveaway-end': { level: 'MODERATOR', page: 'giveaways', module: 'giveaways', execute: (d, _g, a, b) => d.services.giveaways.end(a, numberId.parse(b.id)), target: 'id' },
   'analytics-toggle': { level: 'ADMIN', page: 'analytics', execute: (d, g, a, b) => d.services.modules.setEnabled(g, 'analytics', z.enum(['true', 'false']).parse(b.enabled) === 'true', a.userId) },
   'analytics-retention': { level: 'ADMIN', page: 'analytics', execute: (d, g, _a, b) => { if (!d.analytics?.configure) throw new Error('Analytics retention unavailable'); return d.analytics.configure(_a, z.coerce.number().int().min(30).max(730).parse(b.days)); } },
+  'automation-create': { level: 'ADMIN', page: 'automations', execute: async (d, g, a, b) => {
+    const draft = parseAutomationDraft(b);
+    await assertAutomationTargets(d.client, g, draft);
+    return d.services.automation.create(a, draft);
+  } },
+  'automation-update': { level: 'ADMIN', page: 'automations', execute: async (d, g, a, b) => {
+    const id = numberId.parse(b.automationId);
+    await d.services.automation.inspect(a, id);
+    const draft = parseAutomationDraft(b);
+    await assertAutomationTargets(d.client, g, draft);
+    return d.services.automation.update(a, id, draft);
+  }, target: 'automationId' },
+  'automation-enable': { level: 'ADMIN', page: 'automations', execute: (d, _g, a, b) => d.services.automation.setEnabled(a, numberId.parse(b.automationId), true), target: 'automationId' },
+  'automation-disable': { level: 'ADMIN', page: 'automations', execute: (d, _g, a, b) => d.services.automation.setEnabled(a, numberId.parse(b.automationId), false), target: 'automationId' },
+  'automation-delete': { level: 'ADMIN', page: 'automations', execute: (d, _g, a, b) => d.services.automation.delete(a, numberId.parse(b.automationId)), target: 'automationId' },
+  'automation-module-toggle': { level: 'ADMIN', page: 'automations', execute: (d, g, a, b) => d.services.modules.setEnabled(g, 'automation', z.enum(['true', 'false']).parse(b.enabled) === 'true', a.userId) },
+  'automation-reconcile-sent': { level: 'ADMIN', page: 'automations', execute: async (d, _g, a, b) => {
+    const id = z.string().uuid().parse(b.executionId);
+    if ((await d.services.automation.inspectExecution(a, id)).automationId !== numberId.parse(b.automationId))
+      throw new AppError('NOT_FOUND', 'Automation execution not found');
+    return d.services.automation.reconcile(a, id, z.coerce.number().int().min(0).max(1).parse(b.position), 'CONFIRMED_SENT');
+  }, target: 'executionId' },
+  'automation-reconcile-not-sent': { level: 'ADMIN', page: 'automations', execute: async (d, _g, a, b) => {
+    const id = z.string().uuid().parse(b.executionId);
+    if ((await d.services.automation.inspectExecution(a, id)).automationId !== numberId.parse(b.automationId))
+      throw new AppError('NOT_FOUND', 'Automation execution not found');
+    return d.services.automation.reconcile(a, id, z.coerce.number().int().min(0).max(1).parse(b.position), 'CONFIRMED_NOT_SENT');
+  }, target: 'executionId' },
   'role-set': { level: 'GUILD_OWNER', page: 'roles', execute: async (d, g, a, b) => {
     const roleId = snowflake.parse(b.roleId);
     const guild = await d.client.guilds.fetch({ guild: g, force: true });
@@ -60,7 +94,8 @@ const actions: Record<string, { level: PermissionLevel; page: Page; module?: str
   }, target: 'roleId' },
   'role-remove': { level: 'GUILD_OWNER', page: 'roles', execute: (d, _g, a, b) => d.services.permissions.removeRole(a, snowflake.parse(b.roleId), d.services.repository), target: 'roleId' },
 };
-const confirmedActions = new Set(['module-toggle', 'moderation-warn', 'ticket-close', 'event-cancel', 'giveaway-end', 'analytics-toggle', 'role-set', 'role-remove']);
+const confirmedActions = new Set(['module-toggle', 'moderation-warn', 'ticket-close', 'event-cancel', 'giveaway-end', 'analytics-toggle', 'role-set', 'role-remove',
+  'automation-enable', 'automation-disable', 'automation-delete', 'automation-module-toggle', 'automation-reconcile-sent', 'automation-reconcile-not-sent']);
 const params = z.object({ guildId: snowflake, page: z.string().optional(), action: z.string().optional() });
 function cookieHeader(raw: string | undefined, name: string): string | undefined { const part = raw?.split(';').map(x => x.trim()).find(x => x.startsWith(`${name}=`)); return part?.slice(name.length + 1); }
 function setCookie(reply: { setCookie(name: string, value: string, options: CookieValue['options']): unknown }, value: CookieValue) { reply.setCookie(value.name, value.value, value.options); }
@@ -132,7 +167,24 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
       csrfToken: deps.auth.csrfToken(cookieHeader(request.headers.cookie, deps.auth.clearSessionCookie().name)) ?? '',
       actorLevel: await deps.services.permissions.resolve(actor), disabledModule }));
     let data: unknown;
-    if (page === 'analytics') {
+    if (page === 'automations') {
+      const query = z.object({ automationId: numberId.optional(), executionId: z.string().uuid().optional() }).strict().parse(request.query);
+      const [moduleEnabled, rules, executions] = await Promise.all([
+        deps.services.modules.isEnabled(guildId, 'automation'),
+        deps.services.automation.list(actor),
+        deps.services.automation.listRecentExecutions(actor, query.automationId, 50),
+      ]);
+      const selected = query.automationId ? await deps.services.automation.inspect(actor, query.automationId) : null;
+      const selectedExecution = query.executionId ? await deps.services.automation.inspectExecution(actor, query.executionId) : null;
+      if (selectedExecution && query.automationId && selectedExecution.automationId !== query.automationId)
+        return reply.code(404).send('Not found');
+      let channels: { id: string; name: string }[] = [];
+      try { channels = await eligibleAutomationChannels(deps.client, guildId); }
+      catch (error) { deps.logger?.error({ requestId: request.id, errorType: error instanceof Error ? error.name : 'unknown' },
+        'Automation channel selection unavailable'); }
+      data = { moduleEnabled, channels, rules, selected, executions, selectedExecution } satisfies AutomationDashboardView;
+    }
+    else if (page === 'analytics') {
       const { range } = z.object({ range: z.enum(['24h', '7d', '30d', '90d']).default('7d') }).parse(request.query);
       if (await deps.services.modules.isEnabled(guildId, 'analytics')) {
         const timezone = (await deps.services.guildConfig.get(guildId))?.timezone ?? 'UTC';
@@ -186,14 +238,18 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
     const raw = request.headers.cookie; const session = await sessionFor(request, reply); if (!session) return reply.code(401).send('Unauthorized');
     let actor: Actor | undefined; let succeeded = false; let attempted = false;
     try {
-      const body = bodySchema.parse(request.body) as Record<string, string>;
+      const body = (automationMutation.has(name!) ? automationBodySchema : bodySchema).parse(request.body) as Record<string, string>;
       if (!originValid(request) || !deps.auth.verifyCsrf(cookieHeader(raw, deps.auth.clearSessionCookie().name), body.csrfToken ?? '') ||
         (confirmedActions.has(name!) && body.confirm !== 'yes')) return reply.code(403).send('Forbidden');
       actor = await deps.access.authorize(guildId, session, action.level);
       if (action.module && !await deps.services.modules.isEnabled(guildId, action.module)) return reply.code(404).send('Not found');
       attempted = true;
-      await action.execute(deps, guildId, actor, body); succeeded = true;
-      try { await deps.audit.record({ guildId, actorUserId: actor.userId, action: name!, targetType: name!, targetId: action.target ? body[action.target] : undefined, success: true, requestId: request.id }); }
+      const outcome = await action.execute(deps, guildId, actor, body); succeeded = true;
+      const targetId = name === 'automation-create' && outcome && typeof outcome === 'object' && 'id' in outcome &&
+        numberId.safeParse(outcome.id).success ? String(outcome.id) :
+        name === 'automation-module-toggle' ? 'automation' :
+        name?.startsWith('automation-reconcile-') ? `${body.executionId}:${body.position}` : action.target ? body[action.target] : undefined;
+      try { await deps.audit.record({ guildId, actorUserId: actor.userId, action: name!, targetType: name!, targetId, success: true, requestId: request.id }); }
       catch (auditError) { deps.logger?.error({ requestId: request.id, errorType: auditError instanceof Error ? auditError.name : 'unknown' }, 'Dashboard success audit persistence failed'); }
       return reply.redirect(`/g/${guildId}/${action.page}`, 303);
     } catch (error) {
@@ -202,7 +258,11 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
         catch (auditError) { deps.logger?.error({ requestId: request.id, errorType: auditError instanceof Error ? auditError.name : 'unknown' }, 'Dashboard failure audit persistence failed'); }
       }
       deps.logger?.error({ requestId: request.id, errorType: error instanceof Error ? error.name : 'unknown', postMutationAuditFailure: succeeded }, 'Dashboard mutation failed');
-      return reply.code(error instanceof z.ZodError ? 400 : error instanceof AppError && error.code === 'PERMISSION' ? 403 : 500).type('text/plain').send(`Action failed (${request.id})${succeeded ? '; action may have completed, check status before retrying' : ''}`);
+      const status = error instanceof z.ZodError || error instanceof AppError && error.code === 'VALIDATION' ? 400 :
+        error instanceof AppError && error.code === 'PERMISSION' ? 403 :
+        error instanceof AppError && error.code === 'NOT_FOUND' ? 404 :
+        error instanceof AppError && ['DISABLED', 'CONFLICT'].includes(error.code) ? 409 : 500;
+      return reply.code(status).type('text/plain').send(`Action failed (${request.id})${succeeded ? '; action may have completed, check status before retrying' : ''}`);
     }
   });
   return app;

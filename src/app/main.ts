@@ -195,7 +195,7 @@ const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
 });
 let dashboard: Awaited<ReturnType<typeof createDashboardServer>> | undefined;
 const services = { logger, repository, guildConfig, permissions, modules, guildLogs, moderation, verification, antiraid,
-  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements, analytics, ai, aiRuntime };
+  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements, analytics, ai, aiRuntime, automation };
 const scheduler = new ModerationScheduler(moderation, async guildId => {
   const guild = await client.guilds.fetch(guildId);
   if (!client.user) throw new Error('Bot not logged in');
