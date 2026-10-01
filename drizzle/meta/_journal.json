@@ -127,6 +127,13 @@
       "when": 1790719879955,
       "tag": "0017_eager_genesis",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1790831540500,
+      "tag": "0018_neat_tarantula",
+      "breakpoints": true
     }
   ]
 }

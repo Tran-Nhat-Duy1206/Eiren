@@ -15,12 +15,18 @@ import type { DashboardAccess } from './access/dashboard-access.js';
 import type { DashboardReadService } from './data/dashboard-read-service.js';
 import { AppError } from '../core/errors/errors.js';
 import { renderLogin, renderGuildPicker, renderPage, dashboardCss } from './ui.js';
+import type { RetentionView, RetentionPreview } from './retention-ui.js';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const numberId = z.coerce.number().int().positive().safe();
-const pages = ['overview', 'moderation', 'members', 'roles', 'tickets', 'suggestions', 'levels', 'events', 'giveaways', 'analytics', 'automations', 'settings'] as const;
+const ticketRetentionDays = z.coerce.number().int().min(30).max(365);
+const privateRetentionDays = z.coerce.number().int().min(90).max(730);
+const holdDomain = z.enum(['TICKET', 'REPORT', 'APPEAL']);
+function retention(d: DashboardWebDeps): NonNullable<DashboardWebDeps['retention']> { if (!d.retention) throw new AppError('DISABLED', 'Retention unavailable'); return d.retention; }
+const retentionActions = new Set(['retention-preview', 'retention-confirm', 'retention-disable', 'retention-hold-set', 'retention-hold-clear']);
+const pages = ['overview', 'moderation', 'members', 'roles', 'tickets', 'suggestions', 'levels', 'events', 'giveaways', 'analytics', 'automations', 'data-retention', 'settings'] as const;
 type Page = typeof pages[number];
-const pageLevel: Record<Page, PermissionLevel> = { overview: 'HELPER', moderation: 'MODERATOR', members: 'HELPER', roles: 'ADMIN', tickets: 'HELPER', suggestions: 'HELPER', levels: 'HELPER', events: 'HELPER', giveaways: 'HELPER', analytics: 'HELPER', automations: 'ADMIN', settings: 'ADMIN' };
+const pageLevel: Record<Page, PermissionLevel> = { overview: 'HELPER', moderation: 'MODERATOR', members: 'HELPER', roles: 'ADMIN', tickets: 'HELPER', suggestions: 'HELPER', levels: 'HELPER', events: 'HELPER', giveaways: 'HELPER', analytics: 'HELPER', automations: 'ADMIN', 'data-retention': 'ADMIN', settings: 'ADMIN' };
 const pageModule: Partial<Record<Page, string>> = { moderation: 'moderation', tickets: 'tickets', suggestions: 'suggestions', levels: 'levels', events: 'events', giveaways: 'giveaways' };
 type CookieValue = ReturnType<DashboardAuth['clearSessionCookie']>;
 type Session = NonNullable<Awaited<ReturnType<DashboardAuth['getSession']>>>;
@@ -31,6 +37,15 @@ export interface DashboardWebDeps {
   access: Pick<DashboardAccess, 'authorize' | 'listAccessible'>;
   read: DashboardReadService;
   audit: { record(input: { guildId: string; actorUserId: string; action: string; targetType: string; targetId?: string; success: boolean; requestId: string }): Promise<unknown> };
+  retention?: {
+    status(guildId: string): Promise<RetentionView>;
+    preview(actor: Actor, windows: { ticketDays: number; reportDays: number; appealDays: number }): Promise<RetentionPreview>;
+    getPreview(actor: Actor, id: string): Promise<RetentionPreview | null>;
+    confirm(actor: Actor, id: string): Promise<unknown>;
+    disable(actor: Actor): Promise<unknown>;
+    setHold(actor: Actor, domain: 'TICKET' | 'REPORT' | 'APPEAL', recordId: number): Promise<unknown>;
+    clearHold(actor: Actor, domain: 'TICKET' | 'REPORT' | 'APPEAL', recordId: number): Promise<unknown>;
+  };
   analytics?: { summary(guildId: string, range: '24h' | '7d' | '30d' | '90d', timezone?: string): Promise<unknown>; configure?(actor: Actor, days: number): Promise<unknown> };
   moderationGatewayForGuild?: (guildId: string) => Promise<ModerationGateway>;
   trustProxy?: boolean;
@@ -82,6 +97,11 @@ const actions: Record<string, { level: PermissionLevel; page: Page; module?: str
       throw new AppError('NOT_FOUND', 'Automation execution not found');
     return d.services.automation.reconcile(a, id, z.coerce.number().int().min(0).max(1).parse(b.position), 'CONFIRMED_NOT_SENT');
   }, target: 'executionId' },
+  'retention-preview': { level: 'ADMIN', page: 'data-retention', execute: (d, _g, a, b) => retention(d).preview(a, { ticketDays: ticketRetentionDays.parse(b.ticketDays), reportDays: privateRetentionDays.parse(b.reportDays), appealDays: privateRetentionDays.parse(b.appealDays) }) },
+  'retention-confirm': { level: 'ADMIN', page: 'data-retention', target: 'previewId', execute: (d, _g, a, b) => { if (b.phrase !== 'ENABLE RETENTION') throw new AppError('VALIDATION', 'Confirmation phrase does not match'); return retention(d).confirm(a, z.string().uuid().parse(b.previewId)); } },
+  'retention-disable': { level: 'ADMIN', page: 'data-retention', execute: (d, _g, a) => retention(d).disable(a) },
+  'retention-hold-set': { level: 'ADMIN', page: 'data-retention', target: 'recordId', execute: (d, _g, a, b) => retention(d).setHold(a, holdDomain.parse(b.domain), numberId.parse(b.recordId)) },
+  'retention-hold-clear': { level: 'ADMIN', page: 'data-retention', target: 'recordId', execute: (d, _g, a, b) => retention(d).clearHold(a, holdDomain.parse(b.domain), numberId.parse(b.recordId)) },
   'role-set': { level: 'GUILD_OWNER', page: 'roles', execute: async (d, g, a, b) => {
     const roleId = snowflake.parse(b.roleId);
     const guild = await d.client.guilds.fetch({ guild: g, force: true });
@@ -95,7 +115,8 @@ const actions: Record<string, { level: PermissionLevel; page: Page; module?: str
   'role-remove': { level: 'GUILD_OWNER', page: 'roles', execute: (d, _g, a, b) => d.services.permissions.removeRole(a, snowflake.parse(b.roleId), d.services.repository), target: 'roleId' },
 };
 const confirmedActions = new Set(['module-toggle', 'moderation-warn', 'ticket-close', 'event-cancel', 'giveaway-end', 'analytics-toggle', 'role-set', 'role-remove',
-  'automation-enable', 'automation-disable', 'automation-delete', 'automation-module-toggle', 'automation-reconcile-sent', 'automation-reconcile-not-sent']);
+  'automation-enable', 'automation-disable', 'automation-delete', 'automation-module-toggle', 'automation-reconcile-sent', 'automation-reconcile-not-sent',
+  'retention-confirm', 'retention-disable', 'retention-hold-set', 'retention-hold-clear']);
 const params = z.object({ guildId: snowflake, page: z.string().optional(), action: z.string().optional() });
 function cookieHeader(raw: string | undefined, name: string): string | undefined { const part = raw?.split(';').map(x => x.trim()).find(x => x.startsWith(`${name}=`)); return part?.slice(name.length + 1); }
 function setCookie(reply: { setCookie(name: string, value: string, options: CookieValue['options']): unknown }, value: CookieValue) { reply.setCookie(value.name, value.value, value.options); }
@@ -167,6 +188,7 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
       csrfToken: deps.auth.csrfToken(cookieHeader(request.headers.cookie, deps.auth.clearSessionCookie().name)) ?? '',
       actorLevel: await deps.services.permissions.resolve(actor), disabledModule }));
     let data: unknown;
+    let retentionPreview: RetentionPreview | null = null;
     if (page === 'automations') {
       const query = z.object({ automationId: numberId.optional(), executionId: z.string().uuid().optional() }).strict().parse(request.query);
       const [moduleEnabled, rules, executions] = await Promise.all([
@@ -183,6 +205,15 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
       catch (error) { deps.logger?.error({ requestId: request.id, errorType: error instanceof Error ? error.name : 'unknown' },
         'Automation channel selection unavailable'); }
       data = { moduleEnabled, channels, rules, selected, executions, selectedExecution } satisfies AutomationDashboardView;
+    }
+    else if (page === 'data-retention') {
+      if (!deps.retention) return reply.code(404).send('Not found');
+      const query = z.object({ previewId: z.string().uuid().optional() }).strict().parse(request.query);
+      const isGuildOwner = actor.userId === actor.guildOwnerId;
+      const preview = query.previewId && isGuildOwner ? await deps.retention.getPreview(actor, query.previewId) : null;
+      if (query.previewId && (!isGuildOwner || !preview || preview.guildId !== guildId || preview.requestedBy !== actor.userId)) return reply.code(404).send('Not found');
+      data = await deps.retention.status(guildId);
+      retentionPreview = preview;
     }
     else if (page === 'analytics') {
       const { range } = z.object({ range: z.enum(['24h', '7d', '30d', '90d']).default('7d') }).parse(request.query);
@@ -230,6 +261,8 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
       actorLevel: await deps.services.permissions.resolve(actor),
       range: page === 'analytics' && ['24h', '7d', '30d', '90d'].includes(query.range ?? '') ? query.range : undefined,
       userId: page === 'members' && snowflake.safeParse(query.userId).success ? query.userId : undefined,
+      retentionPreview,
+      isGuildOwner: page === 'data-retention' && actor.userId === actor.guildOwnerId,
     }));
   });
   app.post('/g/:guildId/action/:action', { config: { rateLimit: { max: 15, timeWindow: '1 minute' } } }, async (request, reply) => {
@@ -242,16 +275,24 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
       if (!originValid(request) || !deps.auth.verifyCsrf(cookieHeader(raw, deps.auth.clearSessionCookie().name), body.csrfToken ?? '') ||
         (confirmedActions.has(name!) && body.confirm !== 'yes')) return reply.code(403).send('Forbidden');
       actor = await deps.access.authorize(guildId, session, action.level);
+      if (retentionActions.has(name!) && actor.userId !== actor.guildOwnerId) return reply.code(403).send('Forbidden');
       if (action.module && !await deps.services.modules.isEnabled(guildId, action.module)) return reply.code(404).send('Not found');
       attempted = true;
       const outcome = await action.execute(deps, guildId, actor, body); succeeded = true;
-      const targetId = name === 'automation-create' && outcome && typeof outcome === 'object' && 'id' in outcome &&
+      const targetId = name === 'retention-preview' ? z.string().uuid().parse((outcome as RetentionPreview).id) :
+        name === 'retention-confirm' ? z.string().uuid().parse(body.previewId) :
+        name === 'retention-hold-set' || name === 'retention-hold-clear' ? `${holdDomain.parse(body.domain)}:${numberId.parse(body.recordId)}` :
+        name === 'automation-create' && outcome && typeof outcome === 'object' && 'id' in outcome &&
         numberId.safeParse(outcome.id).success ? String(outcome.id) :
         name === 'automation-module-toggle' ? 'automation' :
         name?.startsWith('automation-reconcile-') ? `${body.executionId}:${body.position}` : action.target ? body[action.target] : undefined;
-      try { await deps.audit.record({ guildId, actorUserId: actor.userId, action: name!, targetType: name!, targetId, success: true, requestId: request.id }); }
+      const auditAction = name === 'retention-preview' ? 'retention-preview-created' : name === 'retention-confirm' ?
+        (outcome as { previousEnabled?: boolean }).previousEnabled === true ? 'retention-policy-changed' : 'retention-policy-enabled' :
+        name === 'retention-disable' ? 'retention-policy-disabled' : name === 'retention-hold-set' ? 'retention-hold-set' :
+          name === 'retention-hold-clear' ? 'retention-hold-cleared' : name!;
+      try { await deps.audit.record({ guildId, actorUserId: actor.userId, action: auditAction, targetType: name!, targetId, success: true, requestId: request.id }); }
       catch (auditError) { deps.logger?.error({ requestId: request.id, errorType: auditError instanceof Error ? auditError.name : 'unknown' }, 'Dashboard success audit persistence failed'); }
-      return reply.redirect(`/g/${guildId}/${action.page}`, 303);
+      return reply.redirect(`/g/${guildId}/${action.page}${name === 'retention-preview' ? `?previewId=${encodeURIComponent((outcome as RetentionPreview).id)}` : ''}`, 303);
     } catch (error) {
       if (attempted && !succeeded && actor) {
         try { await deps.audit.record({ guildId, actorUserId: actor.userId, action: name!, targetType: name!, success: false, requestId: request.id }); }

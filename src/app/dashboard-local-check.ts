@@ -10,7 +10,8 @@ async function main(): Promise<void> {
   let url: string | undefined;
   let stopServer: ReturnType<typeof setTimeout> | undefined;
   const checks: Record<string, boolean> = { database: false, healthz: false, login: false, css: false, rootRedirect: false, guildsRedirect: false, restrictiveHeaders: false, secretFree: false,
-    automationAdminPage: false, automationOriginCsrf: false, automationCsp: false };
+    automationAdminPage: false, automationOriginCsrf: false, automationCsp: false,
+    retentionPage: false, retentionOriginCsrf: false, retentionCsp: false };
   try {
     const connected = await pool.query('SELECT 1 AS ready');
     checks.database = connected.rows[0]?.ready === 1;
@@ -26,6 +27,11 @@ async function main(): Promise<void> {
       access: { authorize: async (guildId: string) => { if (guildId !== localGuild) return forbidden();
         return { guildId, userId: localGuild, guildOwnerId: localGuild, roleIds: [] }; }, listAccessible: forbidden }, read: {},
       audit: { record: forbidden },
+      retention: { status: async () => ({ policy: { enabled: false, ticketDays: 90, reportDays: 365, appealDays: 365,
+        version: 0, confirmedBy: null, confirmedAt: null }, eligibleCounts: { ticket: 0, report: 0, appeal: 0 },
+        holdCounts: { ticket: 0, report: 0, appeal: 0 }, recentReceipts: [] }),
+        preview: forbidden, getPreview: forbidden, confirm: forbidden, disable: forbidden,
+        setHold: forbidden, clearHold: forbidden },
       auth: {
         startOAuth: forbidden, completeOAuth: forbidden, clearStateCookie: forbidden,
         clearSessionCookie: () => ({ name: 'dashboard_session', value: '', options: { path: '/', httpOnly: true, sameSite: 'lax', secure: false, maxAge: 0 } }),
@@ -79,6 +85,21 @@ async function main(): Promise<void> {
       fetch(protectedAction, { method: 'POST', signal: deadline, headers: { cookie: `dashboard_session=${localSession}`, origin: 'http://evil.example', 'content-type': 'application/x-www-form-urlencoded' }, body: 'csrfToken=local-csrf' }),
     ]);
     checks.automationOriginCsrf = blocked.every(response => response.status === 403);
+    const retentionUrl = new URL(`/g/${localGuild}/data-retention`, url);
+    const retentionResponse = await fetch(retentionUrl, { signal: deadline, headers: { cookie: `dashboard_session=${localSession}` } });
+    const retentionHtml = await retentionResponse.text();
+    checks.retentionPage = retentionResponse.status === 200 && retentionHtml.includes('DB-only retention') &&
+      retentionHtml.includes('action/retention-preview') && retentionHtml.includes('Ticket days') &&
+      !retentionHtml.includes('private transcript');
+    checks.retentionCsp = (retentionResponse.headers.get('content-security-policy') ?? '').includes("script-src 'none'") &&
+      !retentionHtml.includes('<script');
+    checks.secretFree &&= forbiddenValues.every(value => !retentionHtml.includes(value));
+    const retentionAction = new URL(`/g/${localGuild}/action/retention-preview`, url);
+    const retentionBlocked = await Promise.all([
+      fetch(retentionAction, { method: 'POST', signal: deadline, headers: { cookie: `dashboard_session=${localSession}`, origin: 'http://127.0.0.1', 'content-type': 'application/x-www-form-urlencoded' }, body: 'csrfToken=invalid&ticketDays=90&reportDays=365&appealDays=365' }),
+      fetch(retentionAction, { method: 'POST', signal: deadline, headers: { cookie: `dashboard_session=${localSession}`, origin: 'http://evil.example', 'content-type': 'application/x-www-form-urlencoded' }, body: 'csrfToken=local-csrf&ticketDays=90&reportDays=365&appealDays=365' }),
+    ]);
+    checks.retentionOriginCsrf = retentionBlocked.every(response => response.status === 403);
     console.log(JSON.stringify({ url, checks, redirects: { rootStatus: root.response.status, rootLocation: root.response.headers.get('location'), guildsStatus: guilds.response.status, guildsLocation: guilds.response.headers.get('location') }, passed: Object.values(checks).every(Boolean) }));
     if (!Object.values(checks).every(Boolean)) process.exitCode = 1;
   } catch (error) {

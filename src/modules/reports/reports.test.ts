@@ -13,7 +13,7 @@ function setup(level: 'MEMBER' | 'MODERATOR' | 'SENIOR_MODERATOR' = 'MEMBER', no
     if (ranks.indexOf(level) < ranks.indexOf(minimum)) throw new AppError('PERMISSION', 'Not permitted.');
   }) } as unknown as PermissionService;
   const repository = { listReports: vi.fn(async () => []), getReport: vi.fn(async () => ({ id: 1, guildId: actor.guildId, description: 'private' })),
-    closeReport: vi.fn(async () => ({ id: 1 })), listAppeals: vi.fn(async () => []), reviewAppeal: vi.fn(async () => ({ id: 1 })),
+    closeReport: vi.fn(async () => ({ id: 1 })), listAppeals: vi.fn(async () => []), getAppeal: vi.fn(async () => ({ id: 1, guildId: actor.guildId, reason: 'private' })), reviewAppeal: vi.fn(async () => ({ id: 1 })),
     submitReport: vi.fn(async () => ({ id: 1 })), submitAppeal: vi.fn(async () => ({ id: 1 })) };
   return { service: new ReportService(repository as unknown as ReportRepository, permissions, notify), repository };
 }
@@ -58,6 +58,25 @@ describe('reports authorization and privacy', () => {
       [actor.guildId, 'moderation', 'Appeal reviewed', [{ name: 'ID', value: '1' }, { name: 'Status', value: 'REJECTED' }]],
     ]);
     expect(JSON.stringify(notify.mock.calls)).not.toContain('SECRET');
+  });
+  it('renders retention-redacted report and appeal views without null text or reconstructing payloads', async () => {
+    const { service, repository } = setup('MODERATOR');
+    repository.getReport.mockResolvedValueOnce({ id: 7, guildId: actor.guildId, status: 'CLOSED', reporterId: actor.userId,
+      reportedUserId: null, category: 'General', description: null, evidenceUrl: null, resolutionNote: null,
+      narrativeRedactedAt: new Date() } as never);
+    const interaction = { guild: { id: actor.guildId, ownerId: actor.guildOwnerId,
+      members: { fetch: async () => ({ roles: { cache: new Map() } }) } }, user: { id: actor.userId },
+      options: { getSubcommand: () => 'view', getInteger: () => 7 }, editReply: vi.fn() };
+    await reportCommands[0]!.execute(interaction as never, { reports: service } as never);
+    const report = JSON.stringify(interaction.editReply.mock.calls);
+    expect(report).toContain('Content redacted by retention policy.');
+    expect(report).not.toContain('Description: null');
+    repository.getAppeal.mockResolvedValueOnce({ id: 8, guildId: actor.guildId, status: 'REJECTED', appellantId: actor.userId,
+      caseId: null, reason: null, reviewNote: null, narrativeRedactedAt: new Date() } as never);
+    await reportCommands[1]!.execute(interaction as never, { reports: service } as never);
+    const appeal = JSON.stringify(interaction.editReply.mock.calls.at(-1));
+    expect(appeal).toContain('Content redacted by retention policy.');
+    expect(appeal).not.toContain('Reason: null');
   });
   it('forwards guild and appellant identity to transactional persistence', async () => {
     const { service, repository } = setup();

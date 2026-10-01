@@ -56,7 +56,8 @@ export const reportCommands: Command[] = [
         await interaction.editReply({ content: items.length ? items.map(item => `#${item.id} ${safe(item.status)} · ${safe(item.category.slice(0, 60))}`).join('\n') : 'No reports.' });
       } else if (sub === 'view') {
         const item = await services.reports.getReport(actor, interaction.options.getInteger('id', true));
-        await interaction.editReply({ content: `Report #${item.id} (${item.status})\nReporter: ${item.reporterId}\nReported user: ${item.reportedUserId ?? 'Not specified'}\nCategory: ${safe(item.category)}\nDescription: ${safe(item.description.slice(0, 1200))}\nEvidence: ${safe((item.evidenceUrl ?? 'None').slice(0, 200))}\nResolution: ${safe((item.resolutionNote ?? 'None').slice(0, 200))}`, allowedMentions: { parse: [] } });
+        const redacted = item.narrativeRedactedAt !== null;
+        await interaction.editReply({ content: `Report #${item.id} (${item.status})\nReporter: ${item.reporterId}\nReported user: ${item.reportedUserId ?? 'Not specified'}\nCategory: ${safe(item.category)}\nDescription: ${redacted ? 'Content redacted by retention policy.' : safe((item.description ?? '').slice(0, 1200))}\nEvidence: ${redacted ? 'Content redacted by retention policy.' : safe((item.evidenceUrl ?? 'None').slice(0, 200))}\nResolution: ${redacted ? 'Content redacted by retention policy.' : safe((item.resolutionNote ?? 'None').slice(0, 200))}`, allowedMentions: { parse: [] } });
       } else {
         const item = await services.reports.closeReport(actor, interaction.options.getInteger('id', true), interaction.options.getString('note', true));
         await interaction.editReply({ content: `Report #${item.id} closed. No automatic moderation action was taken.` });
@@ -74,7 +75,8 @@ export const reportCommands: Command[] = [
         await interaction.editReply({ content: items.length ? items.map(item => `#${item.id} ${item.status} · case ${item.caseId ?? 'not specified'}`).join('\n') : 'No appeals.' });
       } else if (sub === 'view') {
         const item = await services.reports.getAppeal(actor, interaction.options.getInteger('id', true));
-        await interaction.editReply({ content: `Appeal #${item.id} (${item.status})\nAppellant: ${item.appellantId}\nCase: ${item.caseId ?? 'Not specified'}\nReason: ${safe(item.reason.slice(0, 1400))}\nReview note: ${safe((item.reviewNote ?? 'None').slice(0, 300))}`, allowedMentions: { parse: [] } });
+        const redacted = item.narrativeRedactedAt !== null;
+        await interaction.editReply({ content: `Appeal #${item.id} (${item.status})\nAppellant: ${item.appellantId}\nCase: ${item.caseId ?? 'Not specified'}\nReason: ${redacted ? 'Content redacted by retention policy.' : safe((item.reason ?? '').slice(0, 1400))}\nReview note: ${redacted ? 'Content redacted by retention policy.' : safe((item.reviewNote ?? 'None').slice(0, 300))}`, allowedMentions: { parse: [] } });
       } else {
         const decision = interaction.options.getString('decision', true);
         if (decision !== 'ACCEPTED' && decision !== 'REJECTED') throw new AppError('VALIDATION', 'Invalid decision.');
