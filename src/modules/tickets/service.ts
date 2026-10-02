@@ -127,6 +127,7 @@ export class TicketService {
   async transcript(actor: Actor, id: number) {
     await this.staff(actor, 'MODERATOR');
     const row = await this.ticket(actor, id);
+    if (row.transcriptRedactedAt) throw new AppError('NOT_FOUND', 'The retained transcript was removed under the guild retention policy.');
     if (!row.transcriptGeneratedAt || row.transcript === null) throw new AppError('NOT_FOUND', 'No completed transcript is available for this ticket.');
     return row.transcript;
   }

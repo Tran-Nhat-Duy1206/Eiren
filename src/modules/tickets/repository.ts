@@ -72,7 +72,7 @@ export class TicketRepository {
     });
   }
   async saveTranscript(guildId: string, id: number, transcript: string) {
-    const [row] = await this.db.update(tickets).set({ transcript, transcriptGeneratedAt: new Date() }).where(and(eq(tickets.guildId, guildId), eq(tickets.id, id), isNull(tickets.transcriptGeneratedAt), inArray(tickets.status, ['OPEN', 'CLAIMED']))).returning();
+    const [row] = await this.db.update(tickets).set({ transcript, transcriptGeneratedAt: new Date() }).where(and(eq(tickets.guildId, guildId), eq(tickets.id, id), isNull(tickets.transcriptGeneratedAt), isNull(tickets.transcriptRedactedAt), inArray(tickets.status, ['OPEN', 'CLAIMED']))).returning();
     return row;
   }
   async close(guildId: string, id: number, by: string, reason: string) {
@@ -85,6 +85,7 @@ export class TicketRepository {
       const [row] = await tx.select().from(tickets).where(and(eq(tickets.guildId, guildId), eq(tickets.id, id))).for('update');
       if (!row) throw new AppError('NOT_FOUND', 'Ticket not found.');
       if (row.status === 'CLOSED') return { row, changed: false };
+      if (row.transcriptRedactedAt) throw new AppError('CONFLICT', 'A retention-redacted transcript cannot be regenerated.');
       if (!row.channelId) throw new AppError('CONFLICT', 'Ticket channel is still being created.');
       if (!row.transcriptGeneratedAt) {
         const transcript = await fetchTranscript(row.channelId);

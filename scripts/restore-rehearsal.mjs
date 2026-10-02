@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// V8.1: synthetic, disposable PostgreSQL 17 rehearsal. Never point this at user data.
+// V8.1 synthetic PostgreSQL 17 rehearsal, extended through 0019 in V8.2. Never point this at user data.
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -87,10 +87,10 @@ async function main() {
     stage = 'source inspection';
     src = await client(source.url);
     const journal = JSON.parse(await readFile(new URL('../drizzle/meta/_journal.json', import.meta.url), 'utf8')).entries;
-    if (journal.length !== 18 || journal[0]?.idx !== 0 || journal[17]?.idx !== 17 || !journal[17]?.tag.startsWith('0017_'))
-      fail('approved migration inventory must be exactly 0000–0017');
+    if (journal.length !== 20 || journal[0]?.idx !== 0 || journal[19]?.idx !== 19 || !journal[19]?.tag.startsWith('0019_'))
+      fail('approved migration inventory must be exactly 0000–0019');
     const applied = (await src.query('SELECT created_at::text AS applied_at, hash FROM drizzle.__drizzle_migrations ORDER BY id')).rows;
-    if (applied.length !== journal.length) fail('source migration journal differs from 0000–0017');
+    if (applied.length !== journal.length) fail('source migration journal differs from 0000–0019');
     for (let i = 0; i < journal.length; i++) {
       const migration = journal[i];
       const sql = await readFile(new URL(`../drizzle/${migration.tag}.sql`, import.meta.url));
@@ -137,7 +137,7 @@ async function main() {
       await execPg(name, ['--version'], versionFile);
       if (!/\(PostgreSQL\) 17(?:\.|\s|$)/.test(await readFile(versionFile, 'utf8'))) fail(`${name} must be PostgreSQL 17`);
     }
-    J('source migration hashes verified through 0017; all public tables empty; PostgreSQL 17 tools confirmed');
+    J('source migration hashes verified through 0019; all public tables empty; PostgreSQL 17 tools confirmed');
     stage = 'synthetic source marker';
     markerAttempted = true; // A lost INSERT response is still cleaned up in finally.
     await src.query('INSERT INTO guilds (id) VALUES ($1)', [MARKER]);
@@ -163,8 +163,8 @@ async function main() {
     const restoredJournal = (await restored.query('SELECT created_at::text AS applied_at, hash FROM drizzle.__drizzle_migrations ORDER BY id')).rows;
     if (restoredJournal.length !== applied.length || restoredJournal.some((row, i) => row.applied_at !== applied[i].applied_at || row.hash !== applied[i].hash))
       fail('restored ordered migration timestamps/hashes differ');
-    const relations = await restored.query("SELECT to_regclass('public.guilds') AS guilds, to_regclass('public.guild_settings') AS settings, to_regclass('public.automation_action_runs') AS actions");
-    if (!relations.rows[0]?.guilds || !relations.rows[0]?.settings || !relations.rows[0]?.actions) fail('restored tables missing');
+    const relations = await restored.query("SELECT to_regclass('public.guilds') AS guilds, to_regclass('public.guild_settings') AS settings, to_regclass('public.automation_action_runs') AS actions, to_regclass('public.retention_policies') AS policies, to_regclass('public.retention_previews') AS previews, to_regclass('public.retention_receipts') AS receipts");
+    if (!relations.rows[0]?.guilds || !relations.rows[0]?.settings || !relations.rows[0]?.actions || !relations.rows[0]?.policies || !relations.rows[0]?.previews || !relations.rows[0]?.receipts) fail('restored tables missing');
     const fk = await restored.query("SELECT count(*)::int AS count FROM pg_constraint WHERE conrelid = 'public.guild_settings'::regclass AND contype = 'f'");
     if (fk.rows[0]?.count < 1) fail('restored foreign key missing');
     const marker = await restored.query('SELECT g.id FROM guilds g JOIN guild_settings s ON s.guild_id = g.id WHERE g.id = $1 AND s.timezone = $2', [MARKER, 'UTC']);

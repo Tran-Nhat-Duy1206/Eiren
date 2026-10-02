@@ -84,7 +84,7 @@ jobs:
         run: pnpm build
       - name: Check migration files
         run: pnpm db:check
-      - name: Apply migrations 0000 through 0017 to fresh database
+      - name: Apply migrations 0000 through 0019 to fresh database
         run: pnpm db:migrate
       - name: PostgreSQL schema and rollback smoke
         run: pnpm db:smoke
@@ -96,6 +96,15 @@ jobs:
         run: pnpm db:v6
       - name: V7 PostgreSQL validation
         run: pnpm db:v7
+      - name: Create empty disposable V8 upgrade database
+        run: docker exec --user postgres '${{ job.services.postgres.id }}' createdb -U eiren -E UTF8 -T template0 eiren_v8_upgrade_ci
+      - name: V8.2 PostgreSQL retention validation
+        env:
+          V8_DISPOSABLE_DATABASE_URL: postgresql://eiren:eiren_ci_only@127.0.0.1:5432/eiren_v8_upgrade_ci
+        run: pnpm db:v8
+      - name: Remove owned disposable V8 upgrade database
+        if: always()
+        run: docker exec --user postgres '${{ job.services.postgres.id }}' dropdb -U eiren --if-exists eiren_v8_upgrade_ci
       - name: Dashboard loopback smoke
         run: pnpm dashboard:check
       - name: Isolated synthetic PostgreSQL 17 restore rehearsal

@@ -1,0 +1,10 @@
+CREATE INDEX "retention_policies_enabled_idx" ON "retention_policies" USING btree ("guild_id") WHERE "retention_policies"."enabled";--> statement-breakpoint
+CREATE INDEX "retention_previews_consumed_idx" ON "retention_previews" USING btree ("consumed_at") WHERE "retention_previews"."consumed_at" IS NOT NULL;--> statement-breakpoint
+ALTER TABLE "appeals" ADD CONSTRAINT "appeals_retention_redacted_payload_check" CHECK ("appeals"."narrative_redacted_at" IS NULL OR "appeals"."review_note" IS NULL);--> statement-breakpoint
+ALTER TABLE "appeals" ADD CONSTRAINT "appeals_retention_redacted_version_check" CHECK ("appeals"."narrative_redacted_at" IS NULL OR "appeals"."narrative_retention_policy_version" IS NOT NULL);--> statement-breakpoint
+ALTER TABLE "appeals" ADD CONSTRAINT "appeals_retention_redacted_hold_check" CHECK ("appeals"."narrative_redacted_at" IS NULL OR NOT "appeals"."retention_hold");--> statement-breakpoint
+ALTER TABLE "reports" ADD CONSTRAINT "reports_retention_redacted_payload_check" CHECK ("reports"."narrative_redacted_at" IS NULL OR ("reports"."evidence_url" IS NULL AND "reports"."resolution_note" IS NULL));--> statement-breakpoint
+ALTER TABLE "reports" ADD CONSTRAINT "reports_retention_redacted_version_check" CHECK ("reports"."narrative_redacted_at" IS NULL OR "reports"."narrative_retention_policy_version" IS NOT NULL);--> statement-breakpoint
+ALTER TABLE "reports" ADD CONSTRAINT "reports_retention_redacted_hold_check" CHECK ("reports"."narrative_redacted_at" IS NULL OR NOT "reports"."retention_hold");--> statement-breakpoint
+ALTER TABLE "tickets" ADD CONSTRAINT "tickets_retention_redacted_version_check" CHECK ("tickets"."transcript_redacted_at" IS NULL OR "tickets"."transcript_retention_policy_version" IS NOT NULL);--> statement-breakpoint
+ALTER TABLE "tickets" ADD CONSTRAINT "tickets_retention_redacted_hold_check" CHECK ("tickets"."transcript_redacted_at" IS NULL OR NOT "tickets"."retention_hold");

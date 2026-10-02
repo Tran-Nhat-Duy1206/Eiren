@@ -70,6 +70,14 @@ describe('ticket privacy and state transitions', () => {
     await expect(service.transcript(actor, 1)).rejects.toThrow('denied');
     expect(permissions.require).toHaveBeenCalledWith(actor, 'MODERATOR');
   });
+  it('reports a removed transcript as retention redaction without refetching Discord', async () => {
+    const { service, repo, gateway, permissions } = fixture();
+    permissions.require.mockResolvedValue(undefined);
+    repo.get.mockResolvedValueOnce({ ...row, status: 'CLOSED', transcript: null,
+      transcriptGeneratedAt: new Date(), transcriptRedactedAt: new Date(), transcriptRetentionPolicyVersion: 1 });
+    await expect(service.transcript(actor, 1)).rejects.toThrow('removed under the guild retention policy');
+    expect(gateway.transcript).not.toHaveBeenCalled();
+  });
   it('refuses bot and everyone participant overwrites', async () => {
     const { service, gateway, permissions } = fixture();
     permissions.require.mockResolvedValue(undefined);
