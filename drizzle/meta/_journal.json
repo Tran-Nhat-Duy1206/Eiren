@@ -134,6 +134,13 @@
       "when": 1790831540500,
       "tag": "0018_neat_tarantula",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1790835170502,
+      "tag": "0019_fast_molecule_man",
+      "breakpoints": true
     }
   ]
 }

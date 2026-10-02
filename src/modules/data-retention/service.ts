@@ -11,6 +11,9 @@ type PolicyRow = { enabled: boolean; ticket_retention_days: number; report_reten
 type PreviewRow = { id: string; guild_id: string; requested_by: string; ticket_days: number; report_days: number; appeal_days: number; eligible_ticket_count: number; eligible_report_count: number; eligible_appeal_count: number; base_version: number; created_at: Date; expires_at: Date };
 const conflict = (message: string) => new AppError('CONFLICT', message);
 const invalid = (message: string) => new AppError('VALIDATION', message);
+function previewKey(value: string) {
+  if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) throw invalid('Invalid retention preview ID.');
+}
 function owner(actor: Actor) { try { assertOwner(actor); } catch { throw invalid('Only the guild owner can manage retention.'); } }
 function windows(value: RetentionWindows) { try { validateWindows(value); } catch { throw invalid('Invalid retention windows.'); } }
 const view = (row?: PolicyRow): RetentionPolicyView => ({ enabled: row?.enabled ?? false, ticketDays: row?.ticket_retention_days ?? DEFAULT_WINDOWS.ticketDays, reportDays: row?.report_retention_days ?? DEFAULT_WINDOWS.reportDays, appealDays: row?.appeal_retention_days ?? DEFAULT_WINDOWS.appealDays, version: row?.version ?? 0, confirmedBy: row?.confirmed_by ?? null, confirmedAt: row?.confirmed_at ?? null });
@@ -27,11 +30,16 @@ export class DataRetentionService {
   constructor(private readonly db: Database) {}
   async status(guildId: string): Promise<RetentionStatus> {
     const p = view(await policy(this.db, guildId));
-    const [counts, holds, receipts] = await Promise.all([
+    const [counts, holds, receipts, activeHolds] = await Promise.all([
       eligibleCounts(this.db, guildId, p), holdCounts(this.db, guildId),
       this.db.execute(sql`SELECT guild_id,domain,record_id,policy_version,redacted_at FROM retention_receipts WHERE guild_id = ${guildId} ORDER BY redacted_at DESC LIMIT 20`),
+      this.db.execute(sql`SELECT domain,record_id,held_by,held_at FROM (
+        SELECT 'TICKET' AS domain,id AS record_id,retention_hold_by AS held_by,retention_hold_at AS held_at FROM tickets WHERE guild_id = ${guildId} AND retention_hold = true
+        UNION ALL SELECT 'REPORT',id,retention_hold_by,retention_hold_at FROM reports WHERE guild_id = ${guildId} AND retention_hold = true
+        UNION ALL SELECT 'APPEAL',id,retention_hold_by,retention_hold_at FROM appeals WHERE guild_id = ${guildId} AND retention_hold = true
+      ) AS holds ORDER BY held_at DESC NULLS LAST,domain,record_id LIMIT 50`),
     ]);
-    return { policy: p, eligibleCounts: counts, holdCounts: holds, recentReceipts: receipts.rows.map(r => ({ guildId: String(r.guild_id), domain: r.domain as RetentionDomain, recordId: Number(r.record_id), policyVersion: Number(r.policy_version), redactedAt: r.redacted_at as Date })) };
+    return { policy: p, eligibleCounts: counts, holdCounts: holds, activeHolds: activeHolds.rows.map(r => ({ domain: r.domain as RetentionDomain, recordId: Number(r.record_id), heldBy: r.held_by as string | null, heldAt: r.held_at as Date | null })), recentReceipts: receipts.rows.map(r => ({ guildId: String(r.guild_id), domain: r.domain as RetentionDomain, recordId: Number(r.record_id), policyVersion: Number(r.policy_version), redactedAt: r.redacted_at as Date })) };
   }
   async preview(actor: Actor, proposed: RetentionWindows): Promise<RetentionPreviewView> {
     owner(actor); windows(proposed);
@@ -44,15 +52,15 @@ export class DataRetentionService {
     });
   }
   async getPreview(actor: Actor, previewId: string): Promise<RetentionPreviewView | null> {
-    owner(actor);
-    const result = await this.db.execute(sql`SELECT * FROM retention_previews WHERE id::text = ${previewId} AND guild_id = ${actor.guildId} AND requested_by = ${actor.userId} AND consumed_at IS NULL AND expires_at > ${clock}`);
+    owner(actor); previewKey(previewId);
+    const result = await this.db.execute(sql`SELECT * FROM retention_previews WHERE id = ${previewId} AND guild_id = ${actor.guildId} AND requested_by = ${actor.userId} AND consumed_at IS NULL AND expires_at > ${clock}`);
     return result.rows[0] ? previewView(result.rows[0] as PreviewRow) : null;
   }
   async confirm(actor: Actor, previewId: string): Promise<RetentionPolicyView & { previousEnabled: boolean }> {
-    owner(actor);
+    owner(actor); previewKey(previewId);
     return this.db.transaction(async tx => {
       const p = await lockPolicy(tx, actor.guildId);
-      const result = await tx.execute(sql`SELECT * FROM retention_previews WHERE id::text = ${previewId} AND guild_id = ${actor.guildId} AND requested_by = ${actor.userId} FOR UPDATE`);
+      const result = await tx.execute(sql`SELECT * FROM retention_previews WHERE id = ${previewId} AND guild_id = ${actor.guildId} AND requested_by = ${actor.userId} FOR UPDATE`);
       const r = result.rows[0] as PreviewRow & { consumed_at: Date | null } | undefined;
       if (!r || r.consumed_at) throw conflict('Retention preview is unavailable.');
       const valid = await tx.execute(sql`SELECT ${r.expires_at} > ${clock} AS valid`);

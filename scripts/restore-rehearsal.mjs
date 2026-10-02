@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// V8.1 synthetic PostgreSQL 17 rehearsal, extended through 0018 in V8.2. Never point this at user data.
+// V8.1 synthetic PostgreSQL 17 rehearsal, extended through 0019 in V8.2. Never point this at user data.
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -87,10 +87,10 @@ async function main() {
     stage = 'source inspection';
     src = await client(source.url);
     const journal = JSON.parse(await readFile(new URL('../drizzle/meta/_journal.json', import.meta.url), 'utf8')).entries;
-    if (journal.length !== 19 || journal[0]?.idx !== 0 || journal[18]?.idx !== 18 || !journal[18]?.tag.startsWith('0018_'))
-      fail('approved migration inventory must be exactly 0000–0018');
+    if (journal.length !== 20 || journal[0]?.idx !== 0 || journal[19]?.idx !== 19 || !journal[19]?.tag.startsWith('0019_'))
+      fail('approved migration inventory must be exactly 0000–0019');
     const applied = (await src.query('SELECT created_at::text AS applied_at, hash FROM drizzle.__drizzle_migrations ORDER BY id')).rows;
-    if (applied.length !== journal.length) fail('source migration journal differs from 0000–0018');
+    if (applied.length !== journal.length) fail('source migration journal differs from 0000–0019');
     for (let i = 0; i < journal.length; i++) {
       const migration = journal[i];
       const sql = await readFile(new URL(`../drizzle/${migration.tag}.sql`, import.meta.url));
@@ -137,7 +137,7 @@ async function main() {
       await execPg(name, ['--version'], versionFile);
       if (!/\(PostgreSQL\) 17(?:\.|\s|$)/.test(await readFile(versionFile, 'utf8'))) fail(`${name} must be PostgreSQL 17`);
     }
-    J('source migration hashes verified through 0018; all public tables empty; PostgreSQL 17 tools confirmed');
+    J('source migration hashes verified through 0019; all public tables empty; PostgreSQL 17 tools confirmed');
     stage = 'synthetic source marker';
     markerAttempted = true; // A lost INSERT response is still cleaned up in finally.
     await src.query('INSERT INTO guilds (id) VALUES ($1)', [MARKER]);

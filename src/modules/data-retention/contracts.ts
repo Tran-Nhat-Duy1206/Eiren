@@ -6,7 +6,8 @@ export type RetentionWindows = { ticketDays: number; reportDays: number; appealD
 export type RetentionCounts = { ticket: number; report: number; appeal: number };
 export type RetentionPolicyView = RetentionWindows & { enabled: boolean; version: number; confirmedBy: string | null; confirmedAt: Date | null };
 export type RetentionPreviewView = RetentionWindows & { id: string; guildId: string; requestedBy: string; eligibleCounts: RetentionCounts; baseVersion: number; createdAt: Date; expiresAt: Date };
-export type RetentionStatus = { policy: RetentionPolicyView; eligibleCounts: RetentionCounts; holdCounts: RetentionCounts; recentReceipts: { guildId: string; domain: RetentionDomain; recordId: number; policyVersion: number; redactedAt: Date }[] };
+export type RetentionStatus = { policy: RetentionPolicyView; eligibleCounts: RetentionCounts; holdCounts: RetentionCounts; activeHolds: RetentionActiveHold[]; recentReceipts: { guildId: string; domain: RetentionDomain; recordId: number; policyVersion: number; redactedAt: Date }[] };
+export type RetentionActiveHold = { domain: RetentionDomain; recordId: number; heldBy: string | null; heldAt: Date | null };
 export type RetentionHoldView = { domain: RetentionDomain; recordId: number; retentionHold: boolean; retentionHoldBy: string | null; retentionHoldAt: Date | null };
 export const DEFAULT_WINDOWS: RetentionWindows = { ticketDays: 90, reportDays: 365, appealDays: 365 };
 

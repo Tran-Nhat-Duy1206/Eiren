@@ -6,7 +6,8 @@ import type { RetentionCounts, RetentionWindows } from './contracts.js';
 export type RetentionTx = Parameters<Parameters<Database['transaction']>[0]>[0];
 export type Executor = Database | RetentionTx;
 export const clock = sql`clock_timestamp()`;
-const cutoff = (days: number) => sql`${clock} - (${days} * interval '1 day')`;
+// Stable database statement time permits the terminal-time index range bound.
+const cutoff = (days: number) => sql`statement_timestamp() - (${days} * interval '1 day')`;
 
 export function eligible(domain: 'TICKET' | 'REPORT' | 'APPEAL', days: number) {
   switch (domain) {

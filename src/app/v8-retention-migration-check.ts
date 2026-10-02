@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { sql } from 'drizzle-orm';
-import { loadEnv } from '../core/config/env.js';
 import { createDatabase } from '../core/database/connection.js';
 
 // An explicit second DATABASE, never the live database. CI can provision one on its PG17 server.
-const primary = new URL(loadEnv().DATABASE_URL);
+if (!process.env.DATABASE_URL) throw new Error('Explicit synthetic DATABASE_URL required; local .env is never loaded.');
+const primary = new URL(process.env.DATABASE_URL);
+if (!['127.0.0.1', 'localhost', '[::1]'].includes(primary.hostname)) throw new Error('Loopback PostgreSQL required.');
 const source = process.env.V8_DISPOSABLE_DATABASE_URL;
 if (!source) throw new Error('Set V8_DISPOSABLE_DATABASE_URL to an owned disposable PostgreSQL database, separate from DATABASE_URL.');
 const disposable = new URL(source);
@@ -26,7 +27,7 @@ try {
   await db.transaction(async tx => {
     await tx.execute(sql.raw(`SET LOCAL search_path TO ${q}, public`));
     const journal = JSON.parse(readFileSync(new URL('../../drizzle/meta/_journal.json', import.meta.url), 'utf8')) as { entries: { idx: number; tag: string }[] };
-    check('journal contains ordered 0000 through 0018 migrations', journal.entries.length === 19 && journal.entries.every((entry, index) => entry.idx === index && entry.tag.startsWith(String(index).padStart(4, '0') + '_')) && journal.entries[18]?.tag === '0018_neat_tarantula');
+    check('journal contains ordered 0000 through 0019 migrations', journal.entries.length === 20 && journal.entries.every((entry, index) => entry.idx === index && entry.tag.startsWith(String(index).padStart(4, '0') + '_')) && journal.entries[18]?.tag === '0018_neat_tarantula');
     async function apply(entry: { idx: number; tag: string }) {
       const text = readFileSync(new URL(`../../drizzle/${entry.tag}.sql`, import.meta.url), 'utf8');
       const statements = text.split('--> statement-breakpoint').map(s => s.trim()).filter(Boolean);
@@ -49,8 +50,9 @@ try {
     await tx.execute(sql`INSERT INTO appeals (guild_id,appellant_id,status,reviewed_at,reason,review_note)
       VALUES ('v8-preexisting','v8-owner','REJECTED',now() - interval '800 days',${payload},${payload}),
       ('v8-preexisting','v8-owner','PENDING',NULL,${payload},NULL)`);
-    await apply(journal.entries[18]!);
-    stage = 'post-upgrade assertions';
+    for (const entry of journal.entries.slice(18)) {
+    await apply(entry);
+    stage = `${entry.tag} preservation assertions`;
     const rows = await tx.execute(sql`SELECT
       (SELECT array_agg(transcript ORDER BY id) FROM tickets) AS tickets,
       (SELECT array_agg(close_reason ORDER BY id) FROM tickets WHERE status='CLOSED') AS close_reasons,
@@ -71,6 +73,7 @@ try {
     const previews = await tx.execute(sql.raw('SELECT count(*)::int AS total FROM retention_previews'));
     check('no implicit policy opt-in', policy.rows[0]?.total === 0);
     check('no implicit receipt or preview', receipts.rows[0]?.total === 0 && previews.rows[0]?.total === 0);
+    }
     const defaults = await tx.execute(sql.raw("INSERT INTO retention_policies (guild_id) VALUES ('v8-preexisting') RETURNING enabled,ticket_retention_days,report_retention_days,appeal_retention_days,version"));
     check('database policy defaults remain off', defaults.rows[0]?.enabled === false && defaults.rows[0]?.ticket_retention_days === 90 && defaults.rows[0]?.report_retention_days === 365 && defaults.rows[0]?.appeal_retention_days === 365 && defaults.rows[0]?.version === 0);
   });

@@ -84,7 +84,7 @@ jobs:
         run: pnpm build
       - name: Check migration files
         run: pnpm db:check
-      - name: Apply migrations 0000 through 0018 to fresh database
+      - name: Apply migrations 0000 through 0019 to fresh database
         run: pnpm db:migrate
       - name: PostgreSQL schema and rollback smoke
         run: pnpm db:smoke

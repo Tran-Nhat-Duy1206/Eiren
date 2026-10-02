@@ -281,7 +281,7 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
       const outcome = await action.execute(deps, guildId, actor, body); succeeded = true;
       const targetId = name === 'retention-preview' ? z.string().uuid().parse((outcome as RetentionPreview).id) :
         name === 'retention-confirm' ? z.string().uuid().parse(body.previewId) :
-        name === 'retention-hold-set' || name === 'retention-hold-clear' ? `${holdDomain.parse(body.domain)}:${numberId.parse(body.recordId)}` :
+        name === 'retention-hold-set' || name === 'retention-hold-clear' ? `${holdDomain.parse(body.domain)}-${numberId.parse(body.recordId)}` :
         name === 'automation-create' && outcome && typeof outcome === 'object' && 'id' in outcome &&
         numberId.safeParse(outcome.id).success ? String(outcome.id) :
         name === 'automation-module-toggle' ? 'automation' :

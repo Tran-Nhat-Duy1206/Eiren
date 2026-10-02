@@ -29,7 +29,7 @@ async function main(): Promise<void> {
       audit: { record: forbidden },
       retention: { status: async () => ({ policy: { enabled: false, ticketDays: 90, reportDays: 365, appealDays: 365,
         version: 0, confirmedBy: null, confirmedAt: null }, eligibleCounts: { ticket: 0, report: 0, appeal: 0 },
-        holdCounts: { ticket: 0, report: 0, appeal: 0 }, recentReceipts: [] }),
+        holdCounts: { ticket: 0, report: 0, appeal: 0 }, activeHolds: [], recentReceipts: [] }),
         preview: forbidden, getPreview: forbidden, confirm: forbidden, disable: forbidden,
         setHold: forbidden, clearHold: forbidden },
       auth: {
