@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { SubjectRequestService } from '../modules/subject-requests/service.js';
 import { AppError } from '../core/errors/errors.js';
 import type { AuditGapInput, ReceiptView, SubjectRequestView, PreviewView } from '../modules/subject-requests/contracts.js';
 import { createDashboardServer } from './web.js';
@@ -32,7 +34,68 @@ function setup() {
   return { deps: deps as never, subjectRequests, retention, audit, logger, access, setActor: (value: typeof owner, level = 'ADMIN') => { actor = value; rank = level; } };
 }
 
+// Bounded source fallback: real service/repository code, with a deliberately narrow
+// transaction adapter. Any unexpected query fails, rather than simulating success.
+function rejectedStateService(status: SubjectRequestView['status']) {
+  const row = { id: requestId, guild_id: guildId, subject_user_id: request.subjectUserId, status, version: 1, requested_at: now, subject_verified_at: now, previewed_by: null, previewed_at: null, confirmed_by: null, confirmed_at: null, confirmed_preview_id: null, executed_at: null, denied_by: status === 'DENIED' ? owner.userId : null, denied_at: status === 'DENIED' ? now : null, denial_code: status === 'DENIED' ? 'POLICY_RETAINED' : null, terminal_at: status === 'DENIED' ? now : null };
+  const dialect = new PgDialect();
+  const queries: string[] = [];
+  const execute = vi.fn(async (query: Parameters<PgDialect['sqlToQuery']>[0]) => {
+    const compiled = dialect.sqlToQuery(query); queries.push(compiled.sql);
+    if (compiled.sql.startsWith('SET LOCAL')) return { rows: [], rowCount: 0 };
+    if (compiled.sql.includes('FROM subject_requests WHERE') && compiled.sql.trimEnd().endsWith('FOR UPDATE')) {
+      expect(compiled.params).toEqual([guildId, requestId]);
+      return { rows: [{ ...row }], rowCount: 1 };
+    }
+    throw new Error('Unexpected query in rejected-state transaction');
+  });
+  const transaction = vi.fn(async (action: (tx: { execute: typeof execute }) => Promise<unknown>) => action({ execute }));
+  const require = vi.fn(async () => undefined);
+  return { service: new SubjectRequestService({ execute, transaction } as never, { require } as never), queries, row, transaction, require };
+}
+
 describe('reviewed privacy dashboard', () => {
+  it.each(['PENDING', 'PREVIEWED', 'CONFIRMED', 'EXECUTING', 'COMPLETED', 'PARTIAL', 'DENIED'] as const)('gates SSR controls by %s and actual owner identity, not rank', async status => {
+    for (const isOwner of [false, true]) {
+      for (const rank of ['ADMIN', 'BOT_OWNER', 'GUILD_OWNER']) {
+        const f = setup(); f.setActor(isOwner ? owner : { ...owner, userId: '456789012345678901' }, rank);
+        f.subjectRequests.inspect.mockResolvedValue({ ...inspection, request: { ...request, status } });
+        const app = await createDashboardServer(f.deps);
+        const result = await app.inject({ url: `/g/${guildId}/privacy?requestId=${requestId}`, headers });
+        expect(result.statusCode).toBe(200);
+        const allowed = new Set<string>();
+        if (status === 'PENDING' || status === 'PREVIEWED') allowed.add('privacy-preview');
+        if (isOwner && status === 'PREVIEWED') allowed.add('privacy-confirm');
+        if (isOwner && status === 'CONFIRMED') allowed.add('privacy-execute');
+        if (isOwner && ['PENDING', 'PREVIEWED', 'CONFIRMED'].includes(status)) allowed.add('privacy-deny');
+        for (const action of ['privacy-preview', ...Object.keys(phrases)]) expect(result.body.includes(`action/${action}`)).toBe(allowed.has(action));
+        if (status === 'PREVIEWED') expect(result.body).toContain('Refresh preview');
+        expect(f.subjectRequests.execute).not.toHaveBeenCalled();
+        await app.close();
+      }
+    }
+  });
+  it.each([
+    ['DENIED', 'privacy-execute'], ['PENDING', 'privacy-execute'],
+    ['PREVIEWED', 'privacy-execute'], ['CONFIRMED', 'privacy-preview'],
+  ] as const)('crafted owner %s %s fails through the real service with accurate failure audit', async (status, action) => {
+    const f = setup(); const real = rejectedStateService(status);
+    const before = { ...real.row };
+    const operation = action === 'privacy-preview' ? 'preview' : 'execute';
+    const spy = vi.spyOn(real.service, operation);
+    const gap = vi.spyOn(real.service, 'recordAuditGap');
+    (f.deps as { subjectRequests: unknown }).subjectRequests = real.service;
+    const app = await createDashboardServer(f.deps);
+    const result = await app.inject({ method: 'POST', url: `/g/${guildId}/action/${action}`, headers, payload: payload(action) });
+    expect(result.statusCode).toBe(409); expect(result.headers.location).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1); expect(real.transaction).toHaveBeenCalledTimes(1);
+    expect(f.audit.record).toHaveBeenCalledTimes(1);
+    expect(f.audit.record).toHaveBeenCalledWith(expect.objectContaining({ guildId, actorUserId: owner.userId, action, targetType: action, targetId: requestId, success: false }));
+    expect(gap).not.toHaveBeenCalled(); expect(real.row).toEqual(before);
+    expect(real.queries).toHaveLength(3);
+    expect(real.queries.join('\n')).not.toMatch(/INSERT|UPDATE subject_requests SET|DELETE|subject_execution_receipts/);
+    await app.close();
+  });
   it.each(['ADMIN', 'BOT_OWNER', 'GUILD_OWNER'])('denies crafted destructive POSTs from nonowner even with %s rank', async rank => {
     const f = setup(); f.setActor({ ...owner, userId: '456789012345678901', roleIds: ['567890123456789012'] }, rank);
     const app = await createDashboardServer(f.deps);
@@ -46,6 +109,7 @@ describe('reviewed privacy dashboard', () => {
   });
   it('rechecks fresh owner identity after a prior owner page view', async () => {
     const f = setup(); const app = await createDashboardServer(f.deps);
+    f.subjectRequests.inspect.mockResolvedValue({ ...inspection, request: { ...request, status: 'CONFIRMED' } });
     expect((await app.inject({ url: `/g/${guildId}/privacy?requestId=${requestId}`, headers })).body).toContain('action/privacy-execute');
     f.setActor({ ...owner, guildOwnerId: '456789012345678901' }, 'BOT_OWNER');
     expect((await app.inject({ method: 'POST', url: `/g/${guildId}/action/privacy-execute`, headers, payload: payload('privacy-execute') })).statusCode).toBe(403);
@@ -115,7 +179,7 @@ describe('reviewed privacy dashboard', () => {
     const detail = { ...inspection, workflowEvidence: '<current evidence>', auditGaps: [{ id: requestId, actorUserId: '<actor>', action: 'privacy-execute' as const, targetType: 'privacy-execute', targetId: requestId, committedAt: now, detectedAt: now }] };
     const html = renderPrivacyDashboard(guildId, '<csrf>', { requests, receipts, selected: detail }, true);
     for (const hidden of ['HIDDEN_51ST', 'HIDDEN_RECEIPT_51ST', 'SYNTHETIC_PRIVATE_BODY', 'name="userId"', 'name="subjectUserId"', 'privacy-create']) expect(html).not.toContain(hidden);
-    for (const expected of ['&lt;subject&gt;', '&lt;hash&gt;', '&lt;actor&gt;', '&lt;current evidence&gt;', 'MODERATION_ACCOUNTABILITY', 'SELF_GUILD_MEMBER', 'Verification method', 'Eligible total', 'Retained total', 'PARTIAL', 'historical backups may remain', 'excluded only', 'CONFIRM PRIVACY REQUEST', 'ERASE ELIGIBLE DATA', 'DENY PRIVACY REQUEST']) expect(html).toContain(expected);
+    for (const expected of ['&lt;subject&gt;', '&lt;hash&gt;', '&lt;actor&gt;', '&lt;current evidence&gt;', 'MODERATION_ACCOUNTABILITY', 'SELF_GUILD_MEMBER', 'Verification method', 'Eligible total', 'Retained total', 'PARTIAL', 'historical backups may remain', 'excluded only', 'CONFIRM PRIVACY REQUEST', 'DENY PRIVACY REQUEST']) expect(html).toContain(expected);
     expect(renderPage({ page: 'overview', guildId, guildName: 'Guild', csrfToken: '', actorLevel: 'MODERATOR' })).not.toContain(`/g/${guildId}/privacy`);
     expect(renderPage({ page: 'privacy', guildId, guildName: 'Guild', csrfToken: '', actorLevel: 'ADMIN', data: { requests: [], receipts: [], selected: null } })).toContain(`/g/${guildId}/privacy`);
   });

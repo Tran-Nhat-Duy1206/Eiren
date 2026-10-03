@@ -31,6 +31,24 @@ const actor=(guildId:string,userId=OWNER)=>({guildId,userId,guildOwnerId:OWNER,r
 const self=(guildId:string,userId=SUBJECT,fetch?:()=>Promise<void>):SelfInteraction=>({inGuild:()=>true,guildId,user:{id:userId},guild:{id:guildId,members:{fetch:async options=>{check('self fetch forced authenticated user',options.force===true&&options.user===userId);if(fetch)await fetch();return{id:userId,guild:{id:guildId}};}}}});
 async function workflow(guildId:string){const r=await service.createSelfRequest(self(guildId));const p=await service.preview(actor(guildId),r.id);await service.confirm(actor(guildId),r.id,p.id);return{r,p};}
 async function inventory(guildId:string,id:string,version:number){return collectInventory(db,{guildId,requestId:id,subjectUserId:SUBJECT,requestVersion:version});}
+async function transitionSnapshot(guildId:string,id:string){
+  const requestState=await fingerprint(db,sql`SELECT * FROM subject_requests WHERE id=${id}`);
+  const previewState=await fingerprint(db,sql`SELECT * FROM subject_request_previews WHERE request_id=${id} ORDER BY id`);
+  const countState=await fingerprint(db,sql`SELECT c.* FROM subject_request_preview_counts c JOIN subject_request_previews p ON p.id=c.preview_id WHERE p.request_id=${id} ORDER BY c.preview_id,c.disposition,c.category`);
+  const receiptState=await fingerprint(db,sql`SELECT * FROM subject_execution_receipts WHERE request_id=${id}`);
+  const eligibleState=await Promise.all(['member_levels','member_reputation','member_achievements'].map(table=>fingerprint(db,sql`SELECT * FROM ${sql.identifier(table)} WHERE guild_id=${guildId} ORDER BY row_to_json(${sql.identifier(table)})::text`)));
+  for(const table of ['event_participants','event_attendance'])eligibleState.push(await fingerprint(db,sql`SELECT t.* FROM ${sql.identifier(table)} t JOIN community_events e ON e.id=t.event_id WHERE e.guild_id=${guildId} ORDER BY row_to_json(t)::text`));
+  const retainedState=await fingerprint(db,sql`SELECT * FROM moderator_notes WHERE guild_id=${guildId} ORDER BY id`);
+  const eventsState=await fingerprint(db,sql`SELECT * FROM community_events WHERE guild_id=${guildId} ORDER BY id`);
+  return {requestState,previewState,countState,receiptState,eligibleState:JSON.stringify(eligibleState),retainedState,eventsState};
+}
+async function unchangedConflict(label:string,guildId:string,id:string,action:()=>Promise<unknown>){
+  const before=await transitionSnapshot(guildId,id);let error:unknown;
+  try{await action();}catch(e){error=e;}
+  check(`${label} CONFLICT`,!!error&&code(error)==='CONFLICT');
+  const after=await transitionSnapshot(guildId,id);
+  for(const field of Object.keys(before) as (keyof typeof before)[])check(`${label} preserves ${field}`,before[field]===after[field]);
+}
 try{
   const tables=await db.execute(sql`SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name`);
   for(const t of tables.rows)if(await count(String(t.table_name)))throw new Error('Refusing existing public data');
@@ -83,11 +101,9 @@ try{
   await rejects('malformed request ID fails closed',()=>service.inspect(actor(g),'invalid'));
   check('preview exact DB 15 minute lifetime',Math.abs(Date.parse(p.expiresAt)-Date.parse(p.createdAt)-900000)<1000);
   check('preview hash SHA256 and version stored',/^[a-f0-9]{64}$/.test(p.hash)&&p.requestVersion===(await service.inspect(actor(g),r.id)).request.version);
-  await service.confirm(actor(g),r.id,p.id);
-  await rejects('duplicate confirmation refused',()=>service.confirm(actor(g),r.id,p.id));
   const refresh=await service.preview(actor(g),r.id);
   const refreshed=(await service.inspect(actor(g),r.id)).request;
-  check('refresh CONFIRMED clears complete confirmation fence',refreshed.status==='PREVIEWED'&&refreshed.confirmedBy===null&&refreshed.confirmedAt===null&&refreshed.confirmedPreviewId===null&&refreshed.version>p.requestVersion);
+  check('refresh PREVIEWED preserves unconfirmed fence',refreshed.status==='PREVIEWED'&&refreshed.confirmedBy===null&&refreshed.confirmedAt===null&&refreshed.confirmedPreviewId===null&&refreshed.version>p.requestVersion);
   await rejects('refresh consumes prior preview',()=>service.confirm(actor(g),r.id,p.id));
   await db.execute(sql`UPDATE subject_request_previews SET created_at=clock_timestamp()-interval '1 hour',expires_at=clock_timestamp()-interval '1 second' WHERE id=${refresh.id}`);
   await rejects('DB clock expired preview cannot confirm',()=>service.confirm(actor(g),r.id,refresh.id));
@@ -102,6 +118,51 @@ try{
   const denied=await service.deny(actor(g),newer.id,'POLICY_RETAINED');check('structured owner denial terminal',denied.status==='DENIED'&&denied.denialCode==='POLICY_RETAINED'&&!!denied.terminalAt);
   await rejects('denial terminal cannot preview',()=>service.preview(actor(g),newer.id));
   const afterDenial=await service.createSelfRequest(self(g));check('new self request after denial',afterDenial.id!==newer.id);
+
+  stage='state and replay matrix';
+  for(const status of ['PENDING','PREVIEWED','CONFIRMED','EXECUTING','DENIED','COMPLETED','PARTIAL'] as const){
+    const matrixGuild=await guild(),matrix=await service.createSelfRequest(self(matrixGuild));
+    let previewId:string=randomUUID();
+    if(status!=='COMPLETED'){
+      await insertFixture(db,'member_levels',{guild_id:matrixGuild,user_id:SUBJECT,xp:17});
+      await insertFixture(db,'member_reputation',{guild_id:matrixGuild,user_id:SUBJECT,score:17});
+      await insertFixture(db,'member_achievements',{guild_id:matrixGuild,user_id:SUBJECT,achievement_id:'synthetic-matrix'});
+      await eventFixture(db,matrixGuild);
+      await insertFixture(db,'moderator_notes',{guild_id:matrixGuild,target_id:SUBJECT,moderator_id:OWNER,content:PLACEHOLDER});
+    }
+    if(!['PENDING','DENIED'].includes(status))previewId=(await service.preview(actor(matrixGuild,SUBJECT),matrix.id)).id;
+    if(['CONFIRMED','EXECUTING','COMPLETED','PARTIAL'].includes(status))await service.confirm(actor(matrixGuild),matrix.id,previewId);
+    if(status==='EXECUTING')await db.execute(sql`UPDATE subject_requests SET status='EXECUTING',version=version+1 WHERE id=${matrix.id}`);
+    if(status==='DENIED')await service.deny(actor(matrixGuild),matrix.id,'POLICY_RETAINED');
+    if(status==='COMPLETED'||status==='PARTIAL')await service.execute(actor(matrixGuild),matrix.id,previewId);
+    const state=(await service.inspect(actor(matrixGuild),matrix.id)).request;
+    check(`matrix ${status} deterministic initial status`,state.status===status);
+    if(status==='CONFIRMED')check('confirmed metadata captured before ADMIN and OWNER repreview',!!state.confirmedBy&&!!state.confirmedAt&&state.confirmedPreviewId===previewId&&state.version===2);
+    if(status!=='PREVIEWED')await unchangedConflict(`${status} confirm`,matrixGuild,matrix.id,()=>service.confirm(actor(matrixGuild),matrix.id,previewId));
+    if(!['PENDING','PREVIEWED'].includes(status))for(const reviewer of [SUBJECT,OWNER])await unchangedConflict(`${status} ${reviewer===OWNER?'OWNER':'ADMIN'} preview`,matrixGuild,matrix.id,()=>service.preview(actor(matrixGuild,reviewer),matrix.id));
+    if(['EXECUTING','DENIED','COMPLETED','PARTIAL'].includes(status))await unchangedConflict(`${status} deny`,matrixGuild,matrix.id,()=>service.deny(actor(matrixGuild),matrix.id,'OUT_OF_SCOPE'));
+    if(['PENDING','PREVIEWED','EXECUTING','DENIED'].includes(status))await unchangedConflict(`${status} execute`,matrixGuild,matrix.id,()=>service.execute(actor(matrixGuild),matrix.id,previewId));
+    if(status==='CONFIRMED'){
+      check('confirmed rejected repreview leaves old preview unconsumed',(await service.inspect(actor(matrixGuild),matrix.id)).preview?.consumedAt===null);
+      check('confirmed rejected repreview creates no new previews',await count('subject_request_previews',sql`request_id=${matrix.id}`)===1);
+    }
+    if(status==='DENIED'){
+      check('DENIED execute preserves version and denial metadata',state.version===1&&state.deniedBy===OWNER&&!!state.deniedAt&&state.denialCode==='POLICY_RETAINED'&&!!state.terminalAt);
+      check('DENIED execute produces no receipt',await count('subject_execution_receipts',sql`request_id=${matrix.id}`)===0);
+      check('DENIED execute retains all five eligible families',(await inventory(matrixGuild,matrix.id,state.version)).eligibleTotal===5);
+      check('DENIED execute retains primary retained data',await count('moderator_notes',sql`guild_id=${matrixGuild}`)===1);
+    }
+    if(status==='COMPLETED'||status==='PARTIAL'){
+      const before=await transitionSnapshot(matrixGuild,matrix.id),first=(await service.inspect(actor(matrixGuild),matrix.id)).receipt;
+      for(const replayId of [previewId,randomUUID()]){
+        const replay=await service.execute(actor(matrixGuild),matrix.id,replayId);
+        check(`${status} execute retry returns exact receipt`,JSON.stringify(replay.receipt)===JSON.stringify(first));
+        const after=await transitionSnapshot(matrixGuild,matrix.id);
+        for(const field of Object.keys(before) as (keyof typeof before)[])check(`${status} retry preserves ${field}`,before[field]===after[field]);
+      }
+      check(`${status} retries have exactly one receipt`,await count('subject_execution_receipts',sql`request_id=${matrix.id}`)===1);
+    }
+  }
 
   stage='schema constraints';
   await rejects('partial active subject uniqueness enforced by database',()=>insertFixture(db,'subject_requests',{id:randomUUID(),guild_id:g,subject_user_id:SUBJECT}),true);
@@ -131,19 +192,32 @@ try{
   await insertFixture(db,'member_achievements',{guild_id:staleGuild,user_id:SUBJECT,achievement_id:'synthetic'});
   await rejects('new eligible row before execute fails no deletion',()=>service.execute(actor(staleGuild),stale.id,staleP2.id));
   check('failed execute retains CONFIRMED and both records',(await service.inspect(actor(staleGuild),stale.id)).request.status==='CONFIRMED'&&await count('member_levels',sql`guild_id=${staleGuild}`)===1&&await count('member_achievements',sql`guild_id=${staleGuild}`)===1);
-  const tamper=await service.preview(actor(staleGuild),stale.id);
+  await unchangedConflict('stale CONFIRMED ADMIN repreview',staleGuild,stale.id,()=>service.preview(actor(staleGuild,SUBJECT),stale.id));
+  await unchangedConflict('stale CONFIRMED OWNER repreview',staleGuild,stale.id,()=>service.preview(actor(staleGuild),stale.id));
+  await unchangedConflict('stale CONFIRMED execute retry',staleGuild,stale.id,()=>service.execute(actor(staleGuild),stale.id,staleP2.id));
+  await service.deny(actor(staleGuild),stale.id,'POLICY_RETAINED');
+  const replacement=await service.createSelfRequest(self(staleGuild));
+  const tamper=await service.preview(actor(staleGuild),replacement.id);
   await db.execute(sql`UPDATE subject_request_previews SET inventory_hash=${'b'.repeat(64)} WHERE id=${tamper.id}`);
-  await rejects('tampered hash refused independently of totals',()=>service.confirm(actor(staleGuild),stale.id,tamper.id));
-  const tamperCount=await service.preview(actor(staleGuild),stale.id);
+  await rejects('tampered hash refused independently of totals',()=>service.confirm(actor(staleGuild),replacement.id,tamper.id));
+  const tamperCount=await service.preview(actor(staleGuild),replacement.id);
   await db.execute(sql`UPDATE subject_request_preview_counts SET count=count+1 WHERE preview_id=${tamperCount.id}`);
-  await rejects('tampered category count refused',()=>service.confirm(actor(staleGuild),stale.id,tamperCount.id));
-  const versionPreview=await service.preview(actor(staleGuild),stale.id);
+  await rejects('tampered category count refused',()=>service.confirm(actor(staleGuild),replacement.id,tamperCount.id));
+  const versionPreview=await service.preview(actor(staleGuild),replacement.id);
   await db.execute(sql`UPDATE subject_request_previews SET request_version=request_version+1 WHERE id=${versionPreview.id}`);
-  await rejects('preview version mismatch independently refuses confirmation',()=>service.confirm(actor(staleGuild),stale.id,versionPreview.id));
-  const executionExpiry=await service.preview(actor(staleGuild),stale.id);await service.confirm(actor(staleGuild),stale.id,executionExpiry.id);
+  await rejects('preview version mismatch independently refuses confirmation',()=>service.confirm(actor(staleGuild),replacement.id,versionPreview.id));
+  const executionExpiry=await service.preview(actor(staleGuild),replacement.id);await service.confirm(actor(staleGuild),replacement.id,executionExpiry.id);
   await db.execute(sql`UPDATE subject_request_previews SET created_at=clock_timestamp()-interval '1 hour',expires_at=clock_timestamp()-interval '1 second' WHERE id=${executionExpiry.id}`);
-  await rejects('DB-clock expiry rechecked independently at execute',()=>service.execute(actor(staleGuild),stale.id,executionExpiry.id));
-  check('expired execute preserves CONFIRMED and all eligible rows',(await service.inspect(actor(staleGuild),stale.id)).request.status==='CONFIRMED'&&await count('member_levels',sql`guild_id=${staleGuild}`)===1&&await count('member_achievements',sql`guild_id=${staleGuild}`)===1);
+  await rejects('DB-clock expiry rechecked independently at execute',()=>service.execute(actor(staleGuild),replacement.id,executionExpiry.id));
+  check('expired execute preserves CONFIRMED and all eligible rows',(await service.inspect(actor(staleGuild),replacement.id)).request.status==='CONFIRMED'&&await count('member_levels',sql`guild_id=${staleGuild}`)===1&&await count('member_achievements',sql`guild_id=${staleGuild}`)===1);
+
+  await unchangedConflict('expired CONFIRMED ADMIN repreview',staleGuild,replacement.id,()=>service.preview(actor(staleGuild,SUBJECT),replacement.id));
+  await unchangedConflict('expired CONFIRMED OWNER repreview',staleGuild,replacement.id,()=>service.preview(actor(staleGuild),replacement.id));
+  await unchangedConflict('expired CONFIRMED execute retry',staleGuild,replacement.id,()=>service.execute(actor(staleGuild),replacement.id,executionExpiry.id));
+  await service.deny(actor(staleGuild),replacement.id,'POLICY_RETAINED');
+  const expiryReplacement=await service.createSelfRequest(self(staleGuild)),expiryReplacementPreview=await service.preview(actor(staleGuild),expiryReplacement.id);
+  check('expired confirmed owner denial permits distinct new request',expiryReplacement.id!==replacement.id);
+  check('expired confirmed replacement can confirm',(await service.confirm(actor(staleGuild),expiryReplacement.id,expiryReplacementPreview.id)).status==='CONFIRMED');
 
   stage='complete reference inventory and exact deletion';
   const fullGuild=await guild(),full=await service.createSelfRequest(self(fullGuild));
@@ -247,7 +321,7 @@ try{
   check('valid/recent-consumed previews survive',await count('subject_request_previews',sql`id IN (${String(validPreview.id)}::uuid,${String(recentConsumed.id)}::uuid)`)===2);
   check('target V8.2 markers survive governance pruning',markersBefore===await fingerprint(db,sql`SELECT id,transcript_redacted_at,transcript_retention_policy_version FROM tickets WHERE transcript_redacted_at IS NOT NULL ORDER BY id`));
   check('metadata never executes aged active request',(await service.inspect(actor(maintenanceGuild),previewParent.id)).request.status==='PENDING');
-  check('minimum comprehensive check count',checks.length>=104);
+  check('minimum comprehensive check count',checks.length>=306);
 }catch(error){console.error(JSON.stringify({suite:'v83-subject-db',stage,passed:checks.length,code:code(error),constraint:constraint(error)}));process.exitCode=1;}
 finally{
   try{for(const id of guilds){await db.execute(sql`DELETE FROM dashboard_sessions WHERE user_id=${SUBJECT} AND token_hash LIKE 'synthetic-%' AND oauth_guild_ids @> ${JSON.stringify([id])}::jsonb`);await db.execute(sql`DELETE FROM guilds WHERE id=${id}`);}const rows=await db.execute(sql`SELECT (SELECT count(*) FROM guilds)::int AS guilds,(SELECT count(*) FROM subject_requests)::int AS requests,(SELECT count(*) FROM subject_request_previews)::int AS previews,(SELECT count(*) FROM subject_request_preview_counts)::int AS counts,(SELECT count(*) FROM subject_execution_receipts)::int AS receipts,(SELECT count(*) FROM governance_audit_gaps)::int AS gaps`);check('owned fixtures removed and governance empty',Object.values(rows.rows[0]!).every(v=>Number(v)===0));if(!process.exitCode)console.log(JSON.stringify({suite:'v83-subject-db',checks:checks.length,names:checks}));}

@@ -7,7 +7,7 @@ export type Executor = Pick<Database, 'execute'> | Pick<Tx, 'execute'>;
 export const clock = sql`clock_timestamp()`;
 export const key = (id: string) => { if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new AppError('VALIDATION','Invalid privacy request identifier.'); };
 export const owner = (actor: Actor) => { if (!actor.guildId || !actor.userId || actor.userId !== actor.guildOwnerId) throw new AppError('PERMISSION','Only the actual guild owner may confirm, execute or deny a privacy request.'); };
-export const conflict = () => new AppError('CONFLICT','Privacy request or inventory changed, or the preview expired. Create a fresh preview and confirm it.');
+export const conflict = () => new AppError('CONFLICT','Privacy request state or inventory changed, or the preview expired. Check request status before retrying.');
 const date = (v: unknown): string => new Date(v as string | Date).toISOString();
 const nullableDate = (v: unknown): string | null => v == null ? null : date(v);
 export function requestView(r: Record<string, unknown>): SubjectRequestView {

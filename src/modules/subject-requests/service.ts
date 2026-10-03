@@ -10,7 +10,6 @@ import { request, requestView, preview, receipt, receiptView, bound, clock, key,
 import type { Executor, Tx } from './repository.js';
 const summary = (i: InventorySummary): InventorySummary => ({counts:i.counts,eligibleTotal:i.eligibleTotal,retainedTotal:i.retainedTotal,hash:i.hash});
 const context = (r:{id:string;guildId:string;subjectUserId:string},version:number):InventoryContext => ({requestId:r.id,guildId:r.guildId,subjectUserId:r.subjectUserId,requestVersion:version});
-const terminal = (s:string) => ['COMPLETED','PARTIAL','DENIED'].includes(s);
 const date = (v:unknown) => new Date(v as string|Date).toISOString();
 export class SubjectRequestService {
   constructor(private readonly db:Database,private readonly permissions:Pick<PermissionService,'require'>) {}
@@ -59,7 +58,7 @@ export class SubjectRequestService {
   async preview(actor:Actor,id:string):Promise<PreviewView>{
     await this.review(actor);
     return this.transaction(async tx=>{
-      await bound(tx); const r=await request(tx,actor.guildId,id,true); if(terminal(r.status)||r.status==='EXECUTING') throw conflict();
+      await bound(tx); const r=await request(tx,actor.guildId,id,true); if(!['PENDING','PREVIEWED'].includes(r.status)) throw conflict();
       const version=r.version+1;
       const inventory=await collectInventory(tx,context(r,version));
       await tx.execute(sql`UPDATE subject_request_previews SET consumed_at=${clock} WHERE guild_id=${actor.guildId} AND request_id=${id} AND consumed_at IS NULL`);
@@ -91,7 +90,7 @@ export class SubjectRequestService {
     owner(actor); key(previewId);
     return this.transaction(async tx=>{
       await bound(tx); const r=await request(tx,actor.guildId,id,true);
-      if(terminal(r.status)) return {request:r,receipt:await receipt(tx,actor.guildId,id)};
+      if(['COMPLETED','PARTIAL'].includes(r.status)) return {request:r,receipt:await receipt(tx,actor.guildId,id)};
       if(r.status!=='CONFIRMED'||r.confirmedPreviewId!==previewId||!r.confirmedBy) throw conflict();
       const p=await preview(tx,actor.guildId,id,previewId,true); if(r.version!==p.requestVersion+1) throw conflict();
       // Shared with LevelsRepository.award; row locks plus SERIALIZABLE snapshot fence existing state.
