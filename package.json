@@ -23,7 +23,7 @@
     "db:v5": "tsx src/app/v5-db-check.ts",
     "db:v6": "tsx src/app/v6-db-check.ts",
     "db:v7": "tsx src/app/v7-db-check.ts && tsx src/app/v7-retention-db-check.ts && tsx src/app/v7-ai-runtime-db-check.ts && tsx src/app/v7-automation-db-check.ts && tsx src/app/v7-automation-migration-check.ts && tsx src/app/v7-automation-actions-db-check.ts && tsx src/app/v7-automation-dashboard-db-check.ts",
-    "db:v8": "tsx src/app/v8-retention-db-check.ts && tsx src/app/v8-retention-migration-check.ts && tsx src/app/v83-subject-db-check.ts && tsx src/app/v83-subject-migration-check.ts",
+    "db:v8": "tsx src/app/v8-retention-db-check.ts && tsx src/app/v8-retention-migration-check.ts && tsx src/app/v83-subject-db-check.ts && tsx src/app/v83-subject-migration-check.ts && tsx src/app/v84-operations-db-check.ts",
     "dashboard:check": "tsx src/app/dashboard-local-check.ts"
   },
   "dependencies": {

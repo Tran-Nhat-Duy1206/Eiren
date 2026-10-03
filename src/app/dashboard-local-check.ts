@@ -1,6 +1,8 @@
 import { loadEnv } from '../core/config/env.js';
 import { createDatabase } from '../core/database/connection.js';
 import { createDashboardServer, type DashboardWebDeps } from '../dashboard/web.js';
+import { ReadinessService } from '../core/operations/readiness.js';
+import { operationsFixture } from './v84-operations-fixtures.js';
 
 /** Local HTTP smoke plus synthetic ADMIN page/CSRF checks; never opens Discord OAuth. */
 async function main(): Promise<void> {
@@ -12,7 +14,10 @@ async function main(): Promise<void> {
   const checks: Record<string, boolean> = { database: false, healthz: false, login: false, css: false, rootRedirect: false, guildsRedirect: false, restrictiveHeaders: false, secretFree: false,
     automationAdminPage: false, automationOriginCsrf: false, automationCsp: false,
     retentionPage: false, retentionOriginCsrf: false, retentionCsp: false,
-    privacyPage: false, privacyOriginCsrf: false, privacyCsp: false };
+    privacyPage: false, privacyOriginCsrf: false, privacyCsp: false,
+    healthzLiveness: false, readyzReady: false, readyzDegraded: false, operationsAdminPage: false,
+    operationsPrivateFree: false, operationsUncertainLink: false, operationsSinceRestart: false,
+    operationsMigration: false, operationsNoMutations: false };
   try {
     const connected = await pool.query('SELECT 1 AS ready');
     checks.database = connected.rows[0]?.ready === 1;
@@ -21,7 +26,11 @@ async function main(): Promise<void> {
     const forbidden = (): never => { throw new Error('Unexpected OAuth or domain mutation'); };
     const localGuild = '123456789012345678';
     const localSession = 'v75-local-test-session';
+    let gatewayReady = true;
+    const readiness = new ReadinessService(async () => ({ database: 'ready', migrations: 'ready', observedCount: 21 }),
+      () => gatewayReady, () => 'RUNNING', () => ({ v5: 'HEALTHY', moderation: 'HEALTHY' }));
     const deps = {
+      readiness, operations: { inspect: async (guildId: string) => { if (guildId !== localGuild) return forbidden(); return operationsFixture(); } },
       client: { guilds: { fetch: async () => ({ id: localGuild, name: 'Local dashboard fixture' }) } },
       services: { modules: { isEnabled: async () => false }, permissions: { resolve: async () => 'GUILD_OWNER' },
         automation: { list: async () => [], listRecentExecutions: async () => [] } },
@@ -116,6 +125,25 @@ async function main(): Promise<void> {
       fetch(privacyAction, { method: 'POST', signal: deadline, headers: { cookie: `dashboard_session=${localSession}`, origin: 'http://evil.example', 'content-type': 'application/x-www-form-urlencoded' }, body: 'csrfToken=local-csrf&requestId=123e4567-e89b-42d3-a456-426614174000' }),
     ]);
     checks.privacyOriginCsrf = privacyBlocked.every(response => response.status === 403);
+    const readyResponse = await fetch(new URL('/readyz', url), { signal: deadline });
+    const readyBody = await readyResponse.text();
+    checks.readyzReady = readyResponse.status === 200 && readyBody === '{"status":"ready","checks":{"database":"ready","migrations":"ready","gateway":"ready","scheduler":"ready"}}' && readyResponse.headers.get('cache-control') === 'no-store';
+    gatewayReady = false;
+    const degradedResponse = await fetch(new URL('/readyz', url), { signal: deadline });
+    const degradedBody = await degradedResponse.text();
+    checks.readyzDegraded = degradedResponse.status === 503 && degradedBody.includes('"gateway":"not_ready"') && !/hash|guild|checkedAt|observedCount/.test(degradedBody);
+    const stillAlive = await fetch(new URL('/healthz', url), { signal: deadline });
+    checks.healthzLiveness = stillAlive.status === 200 && await stillAlive.text() === '{"status":"ok"}';
+    gatewayReady = true;
+    const operationsResponse = await fetch(new URL(`/g/${localGuild}/operations`, url), { signal: deadline, headers: { cookie: `dashboard_session=${localSession}` } });
+    const operationsHtml = await operationsResponse.text();
+    checks.operationsAdminPage = operationsResponse.status === 200 && operationsHtml.includes('Guild operational backlog') && operationsResponse.headers.get('cache-control') === 'no-store';
+    checks.operationsPrivateFree = forbiddenValues.every(value => !operationsHtml.includes(value)) && !/transcript|report description|appeal reason|static message|migration hash/i.test(operationsHtml);
+    checks.operationsUncertainLink = operationsHtml.includes('Do not blindly retry; inspect and reconcile') && operationsHtml.includes(`/g/${localGuild}/automations`) && operationsHtml.includes('normal dashboard audit write was not confirmed');
+    checks.operationsSinceRestart = operationsHtml.includes('Runtime telemetry since process restart') && operationsHtml.includes('moderation-expiry') && operationsHtml.includes('DEGRADED');
+    checks.operationsMigration = operationsHtml.includes('0020_subject_request_governance') && operationsHtml.includes('Observed migration count') && operationsHtml.includes('NOT_TRACKED');
+    checks.operationsNoMutations = !operationsHtml.includes('/action/') && !operationsHtml.includes('<script') && (operationsResponse.headers.get('content-security-policy') ?? '').includes("script-src 'none'");
+    checks.secretFree &&= forbiddenValues.every(value => !readyBody.includes(value) && !degradedBody.includes(value) && !operationsHtml.includes(value));
     console.log(JSON.stringify({ url, checks, redirects: { rootStatus: root.response.status, rootLocation: root.response.headers.get('location'), guildsStatus: guilds.response.status, guildsLocation: guilds.response.headers.get('location') }, passed: Object.values(checks).every(Boolean) }));
     if (!Object.values(checks).every(Boolean)) process.exitCode = 1;
   } catch (error) {

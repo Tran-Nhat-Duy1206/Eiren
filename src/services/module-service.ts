@@ -48,6 +48,23 @@ export class ModuleService {
     await this.repository.setModuleState(guildId, key, enabled, actorId);
     for (const listener of this.changeListeners) listener(guildId, key);
   }
+  /** Pure read model over a bounded guild snapshot; identical effective dependency/unavailable semantics. */
+  describeOperationalStates(states: readonly { moduleKey: string; enabled: boolean; version: number }[]) {
+    const overrides = new Map(states.map(state => [state.moduleKey, state]));
+    const enabled = (key: string, seen = new Set<string>()): boolean => {
+      if (key === 'core') return true;
+      const definition = this.definitions.get(key);
+      if (!definition || seen.has(key) || this.unavailable.has(key)) return false;
+      seen.add(key);
+      if (!(overrides.get(key)?.enabled ?? definition.defaultEnabled)) return false;
+      for (const dependency of definition.dependencies ?? []) if (!enabled(dependency, seen)) return false;
+      seen.delete(key);
+      return true;
+    };
+    return ['core', ...this.listAvailable().map(definition => definition.key)].map(key => ({
+      key, enabled: enabled(key), version: overrides.get(key)?.version ?? 0,
+    }));
+  }
   listAvailable() { return [...this.definitions.values()].filter(definition => !definition.internal && definition.key !== 'core'); }
   async list(guildId: string) {
     return Promise.all(this.listAvailable().map(async definition => ({ key: definition.key, enabled: await this.isEnabled(guildId, definition.key) })));
