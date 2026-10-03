@@ -1,5 +1,6 @@
 import { renderAutomationDashboard, type AutomationDashboardView } from './automation-ui.js';
 import { renderRetentionDashboard, type RetentionView, type RetentionPreview } from './retention-ui.js';
+import { renderPrivacyDashboard, type PrivacyDashboardView } from './privacy-ui.js';
 
 type PageInput = { page: string; guildId: string; guildName: string; csrfToken: string; items?: unknown; data?: unknown; notice?: string; analyticsEnabled?: boolean; disabledModule?: string; actorLevel?: string; range?: string; userId?: string; retentionPreview?: RetentionPreview | null; isGuildOwner?: boolean };
 
@@ -7,7 +8,7 @@ export function escapeHtml(input: unknown): string {
   return String(input ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character);
 }
 
-const pages = [ ['overview', 'Overview'], ['moderation', 'Moderation'], ['members', 'Members'], ['roles', 'Roles'], ['tickets', 'Tickets'], ['suggestions', 'Suggestions'], ['levels', 'Levels'], ['events', 'Events'], ['giveaways', 'Giveaways'], ['analytics', 'Analytics'], ['automations', 'Automations'], ['data-retention', 'Data retention'], ['settings', 'Bot Settings'] ] as const;
+const pages = [ ['overview', 'Overview'], ['moderation', 'Moderation'], ['members', 'Members'], ['roles', 'Roles'], ['tickets', 'Tickets'], ['suggestions', 'Suggestions'], ['levels', 'Levels'], ['events', 'Events'], ['giveaways', 'Giveaways'], ['analytics', 'Analytics'], ['automations', 'Automations'], ['data-retention', 'Data retention'], ['privacy', 'Privacy requests'], ['settings', 'Bot Settings'] ] as const;
 type Page = typeof pages[number][0];
 const levels = ['MEMBER', 'HELPER', 'MODERATOR', 'SENIOR_MODERATOR', 'ADMIN', 'GUILD_OWNER', 'BOT_OWNER'];
 const may = (actor: string | undefined, required: string): boolean => actor !== undefined && levels.indexOf(actor) >= levels.indexOf(required);
@@ -52,7 +53,7 @@ export function renderPage({ page, guildId, guildName, csrfToken, items, data, n
   const selected = pages.find(([key, title]) => key === page || title === page);
   const key = selected?.[0];
   const base = path(guildId);
-  const navigation = `<nav class="side" aria-label="Dashboard"><a href="/guilds">All servers</a><ul>${pages.filter(([route]) => !['automations', 'data-retention'].includes(route) || may(actorLevel, 'ADMIN')).map(([route, title]) => `<li><a href="${escapeHtml(`${base}/${route}`)}"${key === route ? ' aria-current="page"' : ''}>${escapeHtml(title)}</a></li>`).join('')}</ul></nav>`;
+  const navigation = `<nav class="side" aria-label="Dashboard"><a href="/guilds">All servers</a><ul>${pages.filter(([route]) => !['automations', 'data-retention', 'privacy'].includes(route) || may(actorLevel, 'ADMIN')).map(([route, title]) => `<li><a href="${escapeHtml(`${base}/${route}`)}"${key === route ? ' aria-current="page"' : ''}>${escapeHtml(title)}</a></li>`).join('')}</ul></nav>`;
   const form = (action: string, label: string, fields: string, destructive = false): string => `<form method="post" action="${escapeHtml(`${base}/action/${action}`)}"><h2>${escapeHtml(label)}</h2><input type="hidden" name="csrfToken" value="${escapeHtml(csrfToken)}">${fields}${destructive ? '<label class="check"><input type="checkbox" name="confirm" value="yes" required> I confirm this destructive action</label>' : ''}<button type="submit">${escapeHtml(label)}</button></form>`;
   const forms: string[] = [];
   const add = (required: string, action: string, label: string, fields: string, destructive = false) => { if (!disabledModule && may(actorLevel, required)) forms.push(form(action, label, fields, destructive)); };
@@ -77,7 +78,7 @@ export function renderPage({ page, guildId, guildName, csrfToken, items, data, n
   const rangeSelector = key === 'analytics' ? `<form method="get" action="${escapeHtml(`${base}/analytics`)}"><label>Analytics range<select name="range">${(['24h', '7d', '30d', '90d'] as const).map((option) => `<option value="${option}"${range === option ? ' selected' : ''}>${option}</option>`).join('')}</select></label><button type="submit">Show range</button></form>` : '';
   const memberLookup = key === 'members' ? `<form method="get" action="${escapeHtml(`${base}/members`)}"><label>Member user ID<input type="text" name="userId" maxlength="20" pattern="[0-9]{17,20}" value="${escapeHtml(userId ?? '')}" required></label><button type="submit">Look up member</button></form>` : '';
   const source = items ?? data;
-  const summary = key === 'data-retention' ? data ? renderRetentionDashboard(guildId, csrfToken, data as RetentionView, retentionPreview ?? null, isGuildOwner) : '<p class="empty">Retention service unavailable.</p>' : key === 'automations' ? may(actorLevel, 'ADMIN') && data ? renderAutomationDashboard({ guildId, csrfToken, data: data as AutomationDashboardView }) : '<p class="error" role="alert">This page is not available.</p>' : !key ? '<p class="error" role="alert">This page is not available.</p>' : disabledModule
+  const summary = key === 'privacy' ? may(actorLevel, 'ADMIN') && data ? renderPrivacyDashboard(guildId, csrfToken, data as PrivacyDashboardView, isGuildOwner) : '<p class="empty">Privacy request service unavailable.</p>' : key === 'data-retention' ? data ? renderRetentionDashboard(guildId, csrfToken, data as RetentionView, retentionPreview ?? null, isGuildOwner) : '<p class="empty">Retention service unavailable.</p>' : key === 'automations' ? may(actorLevel, 'ADMIN') && data ? renderAutomationDashboard({ guildId, csrfToken, data: data as AutomationDashboardView }) : '<p class="error" role="alert">This page is not available.</p>' : !key ? '<p class="error" role="alert">This page is not available.</p>' : disabledModule
     ? `<p class="disabled" role="status">${escapeHtml(disabledModule)} is disabled for this server.</p>`
     : key === 'analytics' && !analyticsEnabled ? '<p class="disabled" role="status">Analytics is disabled for this server.</p>' : sections(source, selected[1]);
   return layout(guildName, `<div class="content"><p class="eyebrow">${escapeHtml(guildName)}</p><h1>${escapeHtml(selected?.[1] ?? 'Page unavailable')}</h1>${notice ? `<p class="notice" role="status">${escapeHtml(notice)}</p>` : ''}${rangeSelector}${memberLookup}${summary}${forms.join('')}${actorLevel ? `<p class="muted">Access level: ${escapeHtml(actorLevel)}</p>` : ''}</div>`, navigation, csrfToken);

@@ -3,6 +3,7 @@ import type { BotEvent } from '../core/events/event.js';
 import type { ButtonHandler, SelectMenuHandler } from '../core/components/component.js';
 import type { ModuleDefinition } from '../services/module-service.js';
 import { coreCommands } from '../modules/core/commands.js';
+import { subjectRequestCommands } from '../modules/subject-requests/commands.js';
 import { coreEvents } from '../modules/core/events.js';
 import { loggingEvents } from '../modules/logging/events.js';
 import { moderationCommands } from '../modules/moderation/commands.js';
@@ -44,7 +45,7 @@ export interface ModuleManifest {
 
 // New production modules contribute a manifest here; neither dispatcher needs editing.
 export const manifests: readonly ModuleManifest[] = [
-  { definition: { key: 'core', defaultEnabled: true }, commands: [...coreCommands, ...analyticsCommands], events: coreEvents },
+  { definition: { key: 'core', defaultEnabled: true }, commands: [...coreCommands, ...analyticsCommands, ...subjectRequestCommands], events: coreEvents },
   { definition: { key: 'moderation', defaultEnabled: false }, commands: moderationCommands, events: [] },
   { definition: { key: 'logging', defaultEnabled: false }, commands: [], events: loggingEvents },
   { definition: { key: 'verification', defaultEnabled: false }, commands: verificationCommands, events: verificationEvents, components: verificationButtons },

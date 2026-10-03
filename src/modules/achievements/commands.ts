@@ -10,7 +10,7 @@ export const achievementsCommand: Command = {
   async execute(interaction, services) {
     if (!interaction.guildId) throw new AppError('VALIDATION', 'Use this in a server.');
     const user = interaction.options.getUser('user') ?? interaction.user;
-    const rows = await (services as typeof services & { achievements: AchievementsService }).achievements.evaluateMember(interaction.guildId, user.id);
+    const rows = await (services as typeof services & { achievements: AchievementsService }).achievements.listMember(interaction.guildId, user.id);
     const content = rows.length
       ? `<@${user.id}> achievements:\n${rows.map(row => `• ${row.name} — ${row.description}`).join('\n')}`
       : `<@${user.id}> has no achievements yet.`;
