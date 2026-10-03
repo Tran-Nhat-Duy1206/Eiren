@@ -85,6 +85,16 @@ import { DashboardAccess } from '../dashboard/access/dashboard-access.js';
 import { DashboardAudit } from '../dashboard/access/dashboard-audit.js';
 import { DashboardReadService } from '../dashboard/data/dashboard-read-service.js';
 import { createDashboardServer } from '../dashboard/web.js';
+import { OperationsRuntimeState } from '../core/operations/runtime-state.js';
+import { trackStartupProbe, trackStartupReconciliation } from '../core/operations/startup-tracking.js';
+import { safeFailureCategory } from '../core/operations/failures.js';
+import { OperationalDatabase } from '../core/operations/operational-database.js';
+import { probeDatabase, ReadinessService } from '../core/operations/readiness.js';
+import { OperationsDiagnostics } from '../core/operations/diagnostics.js';
+import { OperationsService } from '../services/operations-service.js';
+import { OperationsViewService } from '../services/operations-view.js';
+
+const operationsRuntime = new OperationsRuntimeState();
 
 const env = loadEnv();
 const logger = createLogger(env.LOG_LEVEL);
@@ -279,6 +289,18 @@ const v5Scheduler = new V5Scheduler([
     logger.debug({ job: 'subject-request-maintenance', ...result }, 'Privacy governance metadata maintenance complete');
   } },
 ], logger);
+// Separate, small read-only pool avoids the product pool's five-second acquisition wait.
+const operationalDatabase = env.DASHBOARD ? new OperationalDatabase(env.DATABASE_URL) : null;
+// Keep an ADMIN diagnostic scan from exhausting the readiness probe's own bounded pool.
+const readinessDatabase = env.DASHBOARD ? new OperationalDatabase(env.DATABASE_URL) : null;
+const readiness = readinessDatabase ? new ReadinessService(() => probeDatabase(readinessDatabase),
+  () => client.isReady(), () => operationsRuntime.snapshot().phase,
+  () => ({ v5: v5Scheduler.telemetry.snapshot().state, moderation: scheduler.telemetry.snapshot().state })) : null;
+const operationsView = operationalDatabase && readiness ? new OperationsViewService(operationsRuntime, readiness,
+  { v5: v5Scheduler.telemetry, moderation: scheduler.telemetry },
+  new OperationsService(new OperationsDiagnostics(operationalDatabase), operationalDatabase, modules)) : null;
+/** Read-only in-process observation for bounded runtime validation; no control or HTTP endpoint. */
+export async function inspectRuntimeOperations(guildId: string) { return operationsView ? operationsView.inspect(guildId) : null; }
 let retentionTimer: NodeJS.Timeout | undefined;
 async function pruneHistory() {
   try { await antiRaidRepository.pruneExpired(); }
@@ -286,7 +308,8 @@ async function pruneHistory() {
 }
 const lifecycle = createBotLifecycle({
   async probe() {
-    // Verify both connectivity and migrations before connecting to Discord.
+    await trackStartupProbe(operationsRuntime, async () => {
+    // Preserve every existing fail-closed table probe before connecting to Discord.
     await db.select({ id: guilds.id }).from(guilds).limit(1);
     await db.select({ id: moderationCases.id }).from(moderationCases).limit(1);
     await db.select({ id: moderatorNotes.id }).from(moderatorNotes).limit(1);
@@ -353,6 +376,7 @@ const lifecycle = createBotLifecycle({
       await db.select({ id: dashboardSessions.tokenHash }).from(dashboardSessions).limit(1);
       await db.select({ id: dashboardAuditLog.id }).from(dashboardAuditLog).limit(1);
     }
+    });
   },
   register() {
     registerCommands(client, registry.commands, services);
@@ -361,10 +385,10 @@ const lifecycle = createBotLifecycle({
     registerSelects(client, registry.selects, services);
     client.once(Events.ClientReady, () => {
       scheduler.start();
-      void tempvoice.reconcileActive().catch(error => logger.error({ errorType: error instanceof Error ? error.name : 'unknown' },
-        'Temporary voice startup reconciliation failed'));
-      analyticsReconcile = reconcileAnalyticsVoice().catch(error => logger.warn({ errorType: error instanceof Error ? error.name : 'unknown' },
-        'Voice analytics startup recovery failed'));
+      void trackStartupReconciliation(operationsRuntime, 'tempvoice', () => tempvoice.reconcileActive())
+        .catch(error => logger.error({ category: safeFailureCategory(error) }, 'Temporary voice startup reconciliation failed'));
+      analyticsReconcile = trackStartupReconciliation(operationsRuntime, 'analyticsVoice', reconcileAnalyticsVoice)
+        .catch(error => logger.warn({ category: safeFailureCategory(error) }, 'Voice analytics startup recovery failed'));
       v5Scheduler.start();
       void pruneHistory();
       retentionTimer = setInterval(() => { void pruneHistory(); }, 60 * 60_000);
@@ -377,6 +401,7 @@ const lifecycle = createBotLifecycle({
       dashboard = await createDashboardServer({
         client, services, auth: dashboardAuth, access: new DashboardAccess(client, permissions),
         read: new DashboardReadService(db), audit: new DashboardAudit(db), analytics, retention: dataRetention, subjectRequests: privacyGovernance,
+        readiness: readiness ?? undefined, operations: operationsView ?? undefined,
         baseUrl: env.DASHBOARD.DASHBOARD_BASE_URL, trustProxy: env.DASHBOARD.DASHBOARD_TRUST_PROXY,
         secureCookies: new URL(env.DASHBOARD.DASHBOARD_BASE_URL).protocol === 'https:', logger,
         moderationGatewayForGuild: async guildId => {
@@ -388,6 +413,8 @@ const lifecycle = createBotLifecycle({
       await dashboard.listen({ host: env.DASHBOARD.DASHBOARD_HOST, port: env.DASHBOARD.DASHBOARD_PORT });
       logger.info({ host: env.DASHBOARD.DASHBOARD_HOST, port: env.DASHBOARD.DASHBOARD_PORT }, 'Dashboard listening');
     }
+    // A late startup completion must not undo a shutdown readiness fence.
+    if (operationsRuntime.snapshot().phase === 'STARTING') operationsRuntime.setPhase('RUNNING');
   },
   destroy: () => client.destroy(),
   closeDatabase: async () => {
@@ -395,10 +422,11 @@ const lifecycle = createBotLifecycle({
     await dashboard?.close();
     await analyticsReconcile;
     await aiRuntime.stop();
-    await scheduler.stop(); await v5Scheduler.stop(); await pool.end();
+    await scheduler.stop(); await v5Scheduler.stop(); await operationalDatabase?.close(); await readinessDatabase?.close(); await pool.end();
   },
 });
 async function shutdown() {
+  operationsRuntime.setPhase('STOPPING');
   logger.info('Shutting down');
   await lifecycle.shutdown();
   logger.info('Shutdown complete');

@@ -29,7 +29,7 @@ describe('shared V5 wakeup scheduler', () => {
     } }], logger as never);
     await scheduler.tick();
     expect(logger.error).toHaveBeenCalledWith({ job: 'analytics', stage: 'analytics.runDue.analytics_guild_hourly',
-      errorType: 'Error' }, 'Scheduled reconciliation failed');
+      failureCategory: 'UNKNOWN' }, 'Scheduled reconciliation failed');
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('credential');
   });
   it('isolates subject metadata cleanup failure from every existing job and future ticks', async () => {
@@ -40,7 +40,7 @@ describe('shared V5 wakeup scheduler', () => {
     await scheduler.tick(); await scheduler.tick();
     for (const job of jobs) expect(job.runDue).toHaveBeenCalledTimes(2);
     expect(privacy.runDue).toHaveBeenCalledTimes(2);
-    expect(logger.error).toHaveBeenCalledWith({job:'subject-request-maintenance',stage:'subject-request.metadata-cleanup',errorType:'Error'},'Scheduled reconciliation failed');
+    expect(logger.error).toHaveBeenCalledWith({job:'subject-request-maintenance',stage:'subject-request.metadata-cleanup',failureCategory:'UNKNOWN'},'Scheduled reconciliation failed');
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('PRIVATE_PAYLOAD_SENTINEL');
   });
   it('reports completed analytics ticks without user or credential data', async () => {

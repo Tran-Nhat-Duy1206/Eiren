@@ -17,6 +17,9 @@ import { AppError } from '../core/errors/errors.js';
 import { renderLogin, renderGuildPicker, renderPage, dashboardCss } from './ui.js';
 import type { RetentionView, RetentionPreview } from './retention-ui.js';
 import type { PrivacyDashboardView } from './privacy-ui.js';
+import { toPublicReadiness, type ReadinessService } from '../core/operations/readiness.js';
+import type { OperationsViewService } from '../services/operations-view.js';
+import { safeFailureCategory } from '../core/operations/failures.js';
 import type { SubjectRequestService } from '../modules/subject-requests/service.js';
 import { DENIAL_CODES, GOVERNANCE_ACTIONS, type GovernanceAction } from '../modules/subject-requests/contracts.js';
 
@@ -32,9 +35,9 @@ const privacyActions = new Set(['privacy-preview', 'privacy-confirm', 'privacy-e
 const privacyOwnerActions = new Set(['privacy-confirm', 'privacy-execute', 'privacy-deny']);
 const governanceActions = new Set<string>(GOVERNANCE_ACTIONS);
 function subjectRequests(d: DashboardWebDeps): NonNullable<DashboardWebDeps['subjectRequests']> { if (!d.subjectRequests) throw new AppError('DISABLED', 'Privacy requests unavailable'); return d.subjectRequests; }
-const pages = ['overview', 'moderation', 'members', 'roles', 'tickets', 'suggestions', 'levels', 'events', 'giveaways', 'analytics', 'automations', 'data-retention', 'privacy', 'settings'] as const;
+const pages = ['overview', 'moderation', 'members', 'roles', 'tickets', 'suggestions', 'levels', 'events', 'giveaways', 'analytics', 'automations', 'data-retention', 'privacy', 'operations', 'settings'] as const;
 type Page = typeof pages[number];
-const pageLevel: Record<Page, PermissionLevel> = { overview: 'HELPER', moderation: 'MODERATOR', members: 'HELPER', roles: 'ADMIN', tickets: 'HELPER', suggestions: 'HELPER', levels: 'HELPER', events: 'HELPER', giveaways: 'HELPER', analytics: 'HELPER', automations: 'ADMIN', 'data-retention': 'ADMIN', privacy: 'ADMIN', settings: 'ADMIN' };
+const pageLevel: Record<Page, PermissionLevel> = { overview: 'HELPER', moderation: 'MODERATOR', members: 'HELPER', roles: 'ADMIN', tickets: 'HELPER', suggestions: 'HELPER', levels: 'HELPER', events: 'HELPER', giveaways: 'HELPER', analytics: 'HELPER', automations: 'ADMIN', 'data-retention': 'ADMIN', privacy: 'ADMIN', operations: 'ADMIN', settings: 'ADMIN' };
 const pageModule: Partial<Record<Page, string>> = { moderation: 'moderation', tickets: 'tickets', suggestions: 'suggestions', levels: 'levels', events: 'events', giveaways: 'giveaways' };
 type CookieValue = ReturnType<DashboardAuth['clearSessionCookie']>;
 type Session = NonNullable<Awaited<ReturnType<DashboardAuth['getSession']>>>;
@@ -44,6 +47,8 @@ export interface DashboardWebDeps {
   auth: Pick<DashboardAuth, 'startOAuth' | 'completeOAuth' | 'clearStateCookie' | 'clearSessionCookie' | 'getSession' | 'revokeSession' | 'csrfToken' | 'verifyCsrf'>;
   access: Pick<DashboardAccess, 'authorize' | 'listAccessible'>;
   read: DashboardReadService;
+  readiness?: Pick<ReadinessService, 'check'>;
+  operations?: Pick<OperationsViewService, 'inspect'>;
   audit: { record(input: { guildId: string; actorUserId: string; action: string; targetType: string; targetId?: string; success: boolean; requestId: string }): Promise<unknown> };
   retention?: {
     status(guildId: string): Promise<RetentionView>;
@@ -151,10 +156,24 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
     const code = 'statusCode' in Object(error) ? (error as { statusCode?: number }).statusCode : undefined;
     const status = code === 413 || (error as { code?: string }).code === 'FST_ERR_CTP_BODY_TOO_LARGE' ? 413 : code === 429 ? 429 : code === 415 ? 415 : error instanceof z.ZodError ? 400 : error instanceof AppError
       ? ({ PERMISSION: 403, NOT_FOUND: 404, VALIDATION: 400, CONFLICT: 409, DISABLED: 409, DATABASE: 500 } as const)[error.code] : 500;
-    deps.logger?.error({ requestId: request.id, errorType: error instanceof Error ? error.name : 'unknown' }, 'Dashboard request failed');
+    const operationsRequest = (request.params as { page?: unknown } | undefined)?.page === 'operations';
+    deps.logger?.error({ requestId: request.id, ...(operationsRequest ? { category: safeFailureCategory(error) }
+      : { errorType: error instanceof Error ? error.name : 'unknown' }) }, 'Dashboard request failed');
     reply.code(status).type('text/plain; charset=utf-8').send(`${status === 403 ? 'Permission denied' : status === 404 ? 'Not found' : 'Request failed'} (${request.id})`);
   });
-  app.get('/healthz', async () => ({ status: 'ok' }));
+  // Machine probes never consume session/auth/Discord REST or the dashboard action rate budget.
+  app.get('/healthz', { config: { rateLimit: false } }, async () => ({ status: 'ok' }));
+  app.get('/readyz', { config: { rateLimit: false } }, async (_request, reply) => {
+    try {
+      if (deps.readiness) {
+        const result = await deps.readiness.check();
+        return reply.code(result.ready ? 200 : 503).send(toPublicReadiness(result));
+      }
+    } catch { /* Fixed fail-closed response; never pass an exception through the public handler. */ }
+    return reply.code(503).send({ status: 'not_ready', checks: {
+      database: 'unavailable', migrations: 'unavailable', gateway: 'not_ready', scheduler: 'starting',
+    } });
+  });
   app.get('/assets/dashboard.css', async (_request, reply) => reply.header('cache-control', 'public, max-age=3600').type('text/css').send(dashboardCss()));
   app.get('/login', async (_request, reply) => reply.type('text/html').send(renderLogin()));
   app.get('/auth/discord', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (_request, reply) => { const result = await deps.auth.startOAuth(); setCookie(reply, result.stateCookie); return reply.redirect(result.authorizationUrl); });
@@ -242,6 +261,11 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
         selected.receipt && (selected.receipt.guildId !== guildId || selected.receipt.requestId !== selectedId || selected.receipt.subjectUserId !== selected.request.subjectUserId))) return reply.code(404).send('Not found');
       const [requests, receipts] = await Promise.all([deps.subjectRequests.list(actor), deps.subjectRequests.recentReceipts(actor)]);
       data = { requests: requests.filter(r => r.guildId === guildId).slice(0, 50), receipts: receipts.filter(r => r.guildId === guildId).slice(0, 50), selected } satisfies PrivacyDashboardView;
+    }
+    else if (page === 'operations') {
+      if (!deps.operations) return reply.code(404).send('Not found');
+      if (!z.object({}).strict().safeParse(request.query).success) return reply.code(400).send('Request failed');
+      data = await deps.operations.inspect(guildId);
     }
     else if (page === 'analytics') {
       const { range } = z.object({ range: z.enum(['24h', '7d', '30d', '90d']).default('7d') }).parse(request.query);
