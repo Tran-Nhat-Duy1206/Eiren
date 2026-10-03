@@ -32,6 +32,17 @@ describe('shared V5 wakeup scheduler', () => {
       errorType: 'Error' }, 'Scheduled reconciliation failed');
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('credential');
   });
+  it('isolates subject metadata cleanup failure from every existing job and future ticks', async () => {
+    const logger = { error: vi.fn(), debug: vi.fn() };
+    const jobs = ['events','giveaways','tempvoice','analytics','automation','ai-maintenance','data-retention'].map(name => ({ name, runDue: vi.fn(async () => {}) }));
+    const privacy = { name: 'subject-request-maintenance', runDue: vi.fn(async () => { throw new ScheduledStageError('subject-request.metadata-cleanup', new Error('PRIVATE_PAYLOAD_SENTINEL')); }) };
+    const scheduler = new V5Scheduler([privacy,...jobs],logger as never);
+    await scheduler.tick(); await scheduler.tick();
+    for (const job of jobs) expect(job.runDue).toHaveBeenCalledTimes(2);
+    expect(privacy.runDue).toHaveBeenCalledTimes(2);
+    expect(logger.error).toHaveBeenCalledWith({job:'subject-request-maintenance',stage:'subject-request.metadata-cleanup',errorType:'Error'},'Scheduled reconciliation failed');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('PRIVATE_PAYLOAD_SENTINEL');
+  });
   it('reports completed analytics ticks without user or credential data', async () => {
     const logger = { error: vi.fn(), debug: vi.fn() };
     const scheduler = new V5Scheduler([{ name: 'analytics', runDue: async () => {} }], logger as never);

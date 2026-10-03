@@ -27,7 +27,7 @@ try {
   await db.transaction(async tx => {
     await tx.execute(sql.raw(`SET LOCAL search_path TO ${q}, public`));
     const journal = JSON.parse(readFileSync(new URL('../../drizzle/meta/_journal.json', import.meta.url), 'utf8')) as { entries: { idx: number; tag: string }[] };
-    check('journal contains ordered 0000 through 0019 migrations', journal.entries.length === 20 && journal.entries.every((entry, index) => entry.idx === index && entry.tag.startsWith(String(index).padStart(4, '0') + '_')) && journal.entries[18]?.tag === '0018_neat_tarantula');
+    check('journal contains ordered 0000 through 0020 migrations; rehearsing original 0000–0019', journal.entries.length === 21 && journal.entries.every((entry, index) => entry.idx === index && entry.tag.startsWith(String(index).padStart(4, '0') + '_')) && journal.entries[18]?.tag === '0018_neat_tarantula');
     async function apply(entry: { idx: number; tag: string }) {
       const text = readFileSync(new URL(`../../drizzle/${entry.tag}.sql`, import.meta.url), 'utf8');
       const statements = text.split('--> statement-breakpoint').map(s => s.trim()).filter(Boolean);
@@ -50,7 +50,7 @@ try {
     await tx.execute(sql`INSERT INTO appeals (guild_id,appellant_id,status,reviewed_at,reason,review_note)
       VALUES ('v8-preexisting','v8-owner','REJECTED',now() - interval '800 days',${payload},${payload}),
       ('v8-preexisting','v8-owner','PENDING',NULL,${payload},NULL)`);
-    for (const entry of journal.entries.slice(18)) {
+    for (const entry of journal.entries.slice(18, 20)) {
     await apply(entry);
     stage = `${entry.tag} preservation assertions`;
     const rows = await tx.execute(sql`SELECT

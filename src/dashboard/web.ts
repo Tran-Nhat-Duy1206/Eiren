@@ -16,6 +16,9 @@ import type { DashboardReadService } from './data/dashboard-read-service.js';
 import { AppError } from '../core/errors/errors.js';
 import { renderLogin, renderGuildPicker, renderPage, dashboardCss } from './ui.js';
 import type { RetentionView, RetentionPreview } from './retention-ui.js';
+import type { PrivacyDashboardView } from './privacy-ui.js';
+import type { SubjectRequestService } from '../modules/subject-requests/service.js';
+import { DENIAL_CODES, GOVERNANCE_ACTIONS, type GovernanceAction } from '../modules/subject-requests/contracts.js';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const numberId = z.coerce.number().int().positive().safe();
@@ -24,9 +27,14 @@ const privateRetentionDays = z.coerce.number().int().min(90).max(730);
 const holdDomain = z.enum(['TICKET', 'REPORT', 'APPEAL']);
 function retention(d: DashboardWebDeps): NonNullable<DashboardWebDeps['retention']> { if (!d.retention) throw new AppError('DISABLED', 'Retention unavailable'); return d.retention; }
 const retentionActions = new Set(['retention-preview', 'retention-confirm', 'retention-disable', 'retention-hold-set', 'retention-hold-clear']);
-const pages = ['overview', 'moderation', 'members', 'roles', 'tickets', 'suggestions', 'levels', 'events', 'giveaways', 'analytics', 'automations', 'data-retention', 'settings'] as const;
+const privacyId = z.string().uuid().transform(id => id.toLowerCase());
+const privacyActions = new Set(['privacy-preview', 'privacy-confirm', 'privacy-execute', 'privacy-deny']);
+const privacyOwnerActions = new Set(['privacy-confirm', 'privacy-execute', 'privacy-deny']);
+const governanceActions = new Set<string>(GOVERNANCE_ACTIONS);
+function subjectRequests(d: DashboardWebDeps): NonNullable<DashboardWebDeps['subjectRequests']> { if (!d.subjectRequests) throw new AppError('DISABLED', 'Privacy requests unavailable'); return d.subjectRequests; }
+const pages = ['overview', 'moderation', 'members', 'roles', 'tickets', 'suggestions', 'levels', 'events', 'giveaways', 'analytics', 'automations', 'data-retention', 'privacy', 'settings'] as const;
 type Page = typeof pages[number];
-const pageLevel: Record<Page, PermissionLevel> = { overview: 'HELPER', moderation: 'MODERATOR', members: 'HELPER', roles: 'ADMIN', tickets: 'HELPER', suggestions: 'HELPER', levels: 'HELPER', events: 'HELPER', giveaways: 'HELPER', analytics: 'HELPER', automations: 'ADMIN', 'data-retention': 'ADMIN', settings: 'ADMIN' };
+const pageLevel: Record<Page, PermissionLevel> = { overview: 'HELPER', moderation: 'MODERATOR', members: 'HELPER', roles: 'ADMIN', tickets: 'HELPER', suggestions: 'HELPER', levels: 'HELPER', events: 'HELPER', giveaways: 'HELPER', analytics: 'HELPER', automations: 'ADMIN', 'data-retention': 'ADMIN', privacy: 'ADMIN', settings: 'ADMIN' };
 const pageModule: Partial<Record<Page, string>> = { moderation: 'moderation', tickets: 'tickets', suggestions: 'suggestions', levels: 'levels', events: 'events', giveaways: 'giveaways' };
 type CookieValue = ReturnType<DashboardAuth['clearSessionCookie']>;
 type Session = NonNullable<Awaited<ReturnType<DashboardAuth['getSession']>>>;
@@ -46,6 +54,7 @@ export interface DashboardWebDeps {
     setHold(actor: Actor, domain: 'TICKET' | 'REPORT' | 'APPEAL', recordId: number): Promise<unknown>;
     clearHold(actor: Actor, domain: 'TICKET' | 'REPORT' | 'APPEAL', recordId: number): Promise<unknown>;
   };
+  subjectRequests?: Pick<SubjectRequestService, 'list' | 'inspect' | 'recentReceipts' | 'preview' | 'confirm' | 'execute' | 'deny' | 'recordAuditGap'>;
   analytics?: { summary(guildId: string, range: '24h' | '7d' | '30d' | '90d', timezone?: string): Promise<unknown>; configure?(actor: Actor, days: number): Promise<unknown> };
   moderationGatewayForGuild?: (guildId: string) => Promise<ModerationGateway>;
   trustProxy?: boolean;
@@ -58,6 +67,8 @@ const bodySchema = z.record(z.string(), z.union([z.string().max(500), z.undefine
 const automationBodySchema = z.record(z.string().max(40), z.union([z.string().max(1_000), z.undefined()]))
   .refine(value => Object.keys(value).length <= 20, 'Too many Automation fields');
 const automationMutation = new Set(['automation-create', 'automation-update']);
+const privacyBodySchema = z.record(z.string().max(40), z.union([z.string().max(500), z.undefined()]))
+  .refine(value => Object.keys(value).length <= 20, 'Too many privacy fields');
 const actions: Record<string, { level: PermissionLevel; page: Page; module?: string; execute: (d: DashboardWebDeps, guildId: string, actor: Actor, b: Record<string, string>) => Promise<unknown>; target?: string }> = {
   'module-toggle': { level: 'ADMIN', page: 'settings', execute: (d, g, a, b) => d.services.modules.setEnabled(g, z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/).parse(b.module), z.enum(['true', 'false']).parse(b.enabled) === 'true', a.userId), target: 'module' },
   'guild-timezone': { level: 'ADMIN', page: 'settings', execute: (d, g, _a, b) => d.services.guildConfig.update(g, 'timezone', z.string().min(1).max(64).parse(b.timezone)) },
@@ -97,6 +108,10 @@ const actions: Record<string, { level: PermissionLevel; page: Page; module?: str
       throw new AppError('NOT_FOUND', 'Automation execution not found');
     return d.services.automation.reconcile(a, id, z.coerce.number().int().min(0).max(1).parse(b.position), 'CONFIRMED_NOT_SENT');
   }, target: 'executionId' },
+  'privacy-preview': { level: 'ADMIN', page: 'privacy', target: 'requestId', execute: (d, _g, a, b) => subjectRequests(d).preview(a, privacyId.parse(b.requestId)) },
+  'privacy-confirm': { level: 'ADMIN', page: 'privacy', target: 'requestId', execute: (d, _g, a, b) => { if (b.phrase !== 'CONFIRM PRIVACY REQUEST') throw new AppError('VALIDATION', 'Confirmation phrase does not match'); return subjectRequests(d).confirm(a, privacyId.parse(b.requestId), privacyId.parse(b.previewId)); } },
+  'privacy-execute': { level: 'ADMIN', page: 'privacy', target: 'requestId', execute: (d, _g, a, b) => { if (b.phrase !== 'ERASE ELIGIBLE DATA') throw new AppError('VALIDATION', 'Confirmation phrase does not match'); return subjectRequests(d).execute(a, privacyId.parse(b.requestId), privacyId.parse(b.previewId)); } },
+  'privacy-deny': { level: 'ADMIN', page: 'privacy', target: 'requestId', execute: (d, _g, a, b) => { if (b.phrase !== 'DENY PRIVACY REQUEST') throw new AppError('VALIDATION', 'Confirmation phrase does not match'); return subjectRequests(d).deny(a, privacyId.parse(b.requestId), z.enum(DENIAL_CODES).parse(b.denialCode)); } },
   'retention-preview': { level: 'ADMIN', page: 'data-retention', execute: (d, _g, a, b) => retention(d).preview(a, { ticketDays: ticketRetentionDays.parse(b.ticketDays), reportDays: privateRetentionDays.parse(b.reportDays), appealDays: privateRetentionDays.parse(b.appealDays) }) },
   'retention-confirm': { level: 'ADMIN', page: 'data-retention', target: 'previewId', execute: (d, _g, a, b) => { if (b.phrase !== 'ENABLE RETENTION') throw new AppError('VALIDATION', 'Confirmation phrase does not match'); return retention(d).confirm(a, z.string().uuid().parse(b.previewId)); } },
   'retention-disable': { level: 'ADMIN', page: 'data-retention', execute: (d, _g, a) => retention(d).disable(a) },
@@ -116,7 +131,7 @@ const actions: Record<string, { level: PermissionLevel; page: Page; module?: str
 };
 const confirmedActions = new Set(['module-toggle', 'moderation-warn', 'ticket-close', 'event-cancel', 'giveaway-end', 'analytics-toggle', 'role-set', 'role-remove',
   'automation-enable', 'automation-disable', 'automation-delete', 'automation-module-toggle', 'automation-reconcile-sent', 'automation-reconcile-not-sent',
-  'retention-confirm', 'retention-disable', 'retention-hold-set', 'retention-hold-clear']);
+  'retention-confirm', 'retention-disable', 'retention-hold-set', 'retention-hold-clear', 'privacy-confirm', 'privacy-execute', 'privacy-deny']);
 const params = z.object({ guildId: snowflake, page: z.string().optional(), action: z.string().optional() });
 function cookieHeader(raw: string | undefined, name: string): string | undefined { const part = raw?.split(';').map(x => x.trim()).find(x => x.startsWith(`${name}=`)); return part?.slice(name.length + 1); }
 function setCookie(reply: { setCookie(name: string, value: string, options: CookieValue['options']): unknown }, value: CookieValue) { reply.setCookie(value.name, value.value, value.options); }
@@ -215,6 +230,19 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
       data = await deps.retention.status(guildId);
       retentionPreview = preview;
     }
+    else if (page === 'privacy') {
+      if (!deps.subjectRequests) return reply.code(404).send('Not found');
+      const parsedQuery = z.object({ requestId: privacyId.optional() }).strict().safeParse(request.query);
+      if (!parsedQuery.success) return reply.code(404).send('Not found');
+      const selectedId = parsedQuery.data.requestId;
+      const selected = selectedId ? await deps.subjectRequests.inspect(actor, selectedId) : null;
+      if (selectedId && !selected) return reply.code(404).send('Not found');
+      if (selected && (selected.request.guildId !== guildId || selected.request.id !== selectedId ||
+        selected.preview && (selected.preview.guildId !== guildId || selected.preview.requestId !== selectedId || selected.preview.subjectUserId !== selected.request.subjectUserId) ||
+        selected.receipt && (selected.receipt.guildId !== guildId || selected.receipt.requestId !== selectedId || selected.receipt.subjectUserId !== selected.request.subjectUserId))) return reply.code(404).send('Not found');
+      const [requests, receipts] = await Promise.all([deps.subjectRequests.list(actor), deps.subjectRequests.recentReceipts(actor)]);
+      data = { requests: requests.filter(r => r.guildId === guildId).slice(0, 50), receipts: receipts.filter(r => r.guildId === guildId).slice(0, 50), selected } satisfies PrivacyDashboardView;
+    }
     else if (page === 'analytics') {
       const { range } = z.object({ range: z.enum(['24h', '7d', '30d', '90d']).default('7d') }).parse(request.query);
       if (await deps.services.modules.isEnabled(guildId, 'analytics')) {
@@ -262,24 +290,25 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
       range: page === 'analytics' && ['24h', '7d', '30d', '90d'].includes(query.range ?? '') ? query.range : undefined,
       userId: page === 'members' && snowflake.safeParse(query.userId).success ? query.userId : undefined,
       retentionPreview,
-      isGuildOwner: page === 'data-retention' && actor.userId === actor.guildOwnerId,
+      isGuildOwner: (page === 'data-retention' || page === 'privacy') && actor.userId === actor.guildOwnerId,
     }));
   });
   app.post('/g/:guildId/action/:action', { config: { rateLimit: { max: 15, timeWindow: '1 minute' } } }, async (request, reply) => {
     const parsed = params.safeParse(request.params); if (!parsed.success) return reply.code(404).send('Not found');
     const { guildId, action: name } = parsed.data; const action = actions[name ?? '']; if (!action) return reply.code(404).send('Not found');
     const raw = request.headers.cookie; const session = await sessionFor(request, reply); if (!session) return reply.code(401).send('Unauthorized');
-    let actor: Actor | undefined; let succeeded = false; let attempted = false;
+    let actor: Actor | undefined; let succeeded = false; let attempted = false; let privacyAuditTarget: string | undefined;
     try {
-      const body = (automationMutation.has(name!) ? automationBodySchema : bodySchema).parse(request.body) as Record<string, string>;
+      const body = (automationMutation.has(name!) ? automationBodySchema : privacyActions.has(name!) ? privacyBodySchema : bodySchema).parse(request.body) as Record<string, string>;
       if (!originValid(request) || !deps.auth.verifyCsrf(cookieHeader(raw, deps.auth.clearSessionCookie().name), body.csrfToken ?? '') ||
         (confirmedActions.has(name!) && body.confirm !== 'yes')) return reply.code(403).send('Forbidden');
       actor = await deps.access.authorize(guildId, session, action.level);
-      if (retentionActions.has(name!) && actor.userId !== actor.guildOwnerId) return reply.code(403).send('Forbidden');
+      if ((retentionActions.has(name!) || privacyOwnerActions.has(name!)) && actor.userId !== actor.guildOwnerId) return reply.code(403).send('Forbidden');
       if (action.module && !await deps.services.modules.isEnabled(guildId, action.module)) return reply.code(404).send('Not found');
+      if (privacyActions.has(name!)) privacyAuditTarget = privacyId.parse(body.requestId);
       attempted = true;
       const outcome = await action.execute(deps, guildId, actor, body); succeeded = true;
-      const targetId = name === 'retention-preview' ? z.string().uuid().parse((outcome as RetentionPreview).id) :
+      const targetId = privacyActions.has(name!) ? privacyId.parse(body.requestId) : name === 'retention-preview' ? z.string().uuid().parse((outcome as RetentionPreview).id) :
         name === 'retention-confirm' ? z.string().uuid().parse(body.previewId) :
         name === 'retention-hold-set' || name === 'retention-hold-clear' ? `${holdDomain.parse(body.domain)}-${numberId.parse(body.recordId)}` :
         name === 'automation-create' && outcome && typeof outcome === 'object' && 'id' in outcome &&
@@ -291,11 +320,19 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
         name === 'retention-disable' ? 'retention-policy-disabled' : name === 'retention-hold-set' ? 'retention-hold-set' :
           name === 'retention-hold-clear' ? 'retention-hold-cleared' : name!;
       try { await deps.audit.record({ guildId, actorUserId: actor.userId, action: auditAction, targetType: name!, targetId, success: true, requestId: request.id }); }
-      catch (auditError) { deps.logger?.error({ requestId: request.id, errorType: auditError instanceof Error ? auditError.name : 'unknown' }, 'Dashboard success audit persistence failed'); }
-      return reply.redirect(`/g/${guildId}/${action.page}${name === 'retention-preview' ? `?previewId=${encodeURIComponent((outcome as RetentionPreview).id)}` : ''}`, 303);
+      catch (auditError) {
+        deps.logger?.error({ requestId: request.id, ...(governanceActions.has(name!) ? { action: name } : {}), errorType: auditError instanceof Error ? auditError.name : 'unknown' }, 'Dashboard success audit persistence failed');
+        if (governanceActions.has(name!)) {
+          if (deps.subjectRequests?.recordAuditGap) {
+            try { await deps.subjectRequests.recordAuditGap({ guildId, actorUserId: actor.userId, action: name as GovernanceAction, targetType: name!, targetId, requestId: request.id }); }
+            catch (gapError) { deps.logger?.error({ requestId: request.id, action: name, errorType: gapError instanceof Error ? gapError.name : 'unknown' }, 'Dashboard audit gap persistence failed'); }
+          } else deps.logger?.error({ requestId: request.id, action: name, errorType: 'AuditGapUnavailable' }, 'Dashboard audit gap persistence unavailable');
+        }
+      }
+      return reply.redirect(`/g/${guildId}/${action.page}${privacyActions.has(name!) ? `?requestId=${encodeURIComponent(privacyId.parse(body.requestId))}` : name === 'retention-preview' ? `?previewId=${encodeURIComponent((outcome as RetentionPreview).id)}` : ''}`, 303);
     } catch (error) {
       if (attempted && !succeeded && actor) {
-        try { await deps.audit.record({ guildId, actorUserId: actor.userId, action: name!, targetType: name!, success: false, requestId: request.id }); }
+        try { await deps.audit.record({ guildId, actorUserId: actor.userId, action: name!, targetType: name!, ...(privacyAuditTarget ? { targetId: privacyAuditTarget } : {}), success: false, requestId: request.id }); }
         catch (auditError) { deps.logger?.error({ requestId: request.id, errorType: auditError instanceof Error ? auditError.name : 'unknown' }, 'Dashboard failure audit persistence failed'); }
       }
       deps.logger?.error({ requestId: request.id, errorType: error instanceof Error ? error.name : 'unknown', postMutationAuditFailure: succeeded }, 'Dashboard mutation failed');

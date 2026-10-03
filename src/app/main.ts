@@ -13,7 +13,8 @@ import { guilds, moderationCases, moderatorNotes, verificationSettings, memberVe
   analyticsMemberState, analyticsActiveVoiceSessions, dashboardSessions, dashboardAuditLog,
   aiSettings, aiUsageDaily, aiRequests, automations, automationActions, automationExecutions,
   automationExecutionActions, automationExecutionAttempts, automationActionRuns,
-  retentionPolicies, retentionPreviews, retentionReceipts } from '../core/database/schema.js';
+  retentionPolicies, retentionPreviews, retentionReceipts,
+  subjectRequests, subjectRequestPreviews, subjectRequestPreviewCounts, subjectExecutionReceipts, governanceAuditGaps } from '../core/database/schema.js';
 import { createLogger } from '../core/logger/logger.js';
 import { registerCommands } from '../core/commands/dispatcher.js';
 import { registerComponents, registerSelects } from '../core/components/component.js';
@@ -76,6 +77,8 @@ import { AutomationService } from '../modules/automation/service.js';
 import { createAutomationDiscordGateway } from '../modules/automation/discord-gateway.js';
 import { DataRetentionService } from '../modules/data-retention/service.js';
 import { runRetentionMaintenance } from '../modules/data-retention/maintenance.js';
+import { SubjectRequestService } from '../modules/subject-requests/service.js';
+import { runSubjectRequestMaintenance } from '../modules/subject-requests/maintenance.js';
 import { observedHumanVoice } from '../modules/analytics/voice-snapshot.js';
 import { DashboardAuth } from '../dashboard/auth/dashboard-auth.js';
 import { DashboardAccess } from '../dashboard/access/dashboard-access.js';
@@ -192,6 +195,7 @@ const automation = new AutomationService(new AutomationRepository(db), permissio
   }
 }, logger, createAutomationDiscordGateway(client));
 const dataRetention = new DataRetentionService(db);
+const privacyGovernance = new SubjectRequestService(db, permissions);
 const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
   baseUrl: env.DASHBOARD.DASHBOARD_BASE_URL, sessionSecret: env.DASHBOARD.DASHBOARD_SESSION_SECRET,
   discordClientId: env.DISCORD_CLIENT_ID, discordClientSecret: env.DASHBOARD.DISCORD_CLIENT_SECRET,
@@ -199,7 +203,7 @@ const dashboardAuth = env.DASHBOARD && new DashboardAuth(db, {
 });
 let dashboard: Awaited<ReturnType<typeof createDashboardServer>> | undefined;
 const services = { logger, repository, guildConfig, permissions, modules, guildLogs, moderation, verification, antiraid,
-  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements, analytics, ai, aiRuntime, automation };
+  roles, tickets, reports, suggestions, levels, reputation, starboard, profiles, events, giveaways, tempvoice, achievements, analytics, ai, aiRuntime, automation, subjectRequests: privacyGovernance };
 const scheduler = new ModerationScheduler(moderation, async guildId => {
   const guild = await client.guilds.fetch(guildId);
   if (!client.user) throw new Error('Bot not logged in');
@@ -269,6 +273,11 @@ const v5Scheduler = new V5Scheduler([
     const result = await runRetentionMaintenance(db);
     logger.debug({ job: 'data-retention', ...result }, 'Database-only retention maintenance complete');
   } },
+  { name: 'subject-request-maintenance', runDue: async () => {
+    // Metadata expiry only: requests never authorize automatic subject erasure.
+    const result = await runSubjectRequestMaintenance(db);
+    logger.debug({ job: 'subject-request-maintenance', ...result }, 'Privacy governance metadata maintenance complete');
+  } },
 ], logger);
 let retentionTimer: NodeJS.Timeout | undefined;
 async function pruneHistory() {
@@ -335,6 +344,11 @@ const lifecycle = createBotLifecycle({
     await db.select({ id: retentionPolicies.guildId }).from(retentionPolicies).limit(1);
     await db.select({ id: retentionPreviews.id }).from(retentionPreviews).limit(1);
     await db.select({ id: retentionReceipts.guildId }).from(retentionReceipts).limit(1);
+    await db.select({ id: subjectRequests.id }).from(subjectRequests).limit(1);
+    await db.select({ id: subjectRequestPreviews.id }).from(subjectRequestPreviews).limit(1);
+    await db.select({ id: subjectRequestPreviewCounts.previewId }).from(subjectRequestPreviewCounts).limit(1);
+    await db.select({ id: subjectExecutionReceipts.requestId }).from(subjectExecutionReceipts).limit(1);
+    await db.select({ id: governanceAuditGaps.id }).from(governanceAuditGaps).limit(1);
     if (dashboardAuth) {
       await db.select({ id: dashboardSessions.tokenHash }).from(dashboardSessions).limit(1);
       await db.select({ id: dashboardAuditLog.id }).from(dashboardAuditLog).limit(1);
@@ -362,7 +376,7 @@ const lifecycle = createBotLifecycle({
     if (env.DASHBOARD && dashboardAuth) {
       dashboard = await createDashboardServer({
         client, services, auth: dashboardAuth, access: new DashboardAccess(client, permissions),
-        read: new DashboardReadService(db), audit: new DashboardAudit(db), analytics, retention: dataRetention,
+        read: new DashboardReadService(db), audit: new DashboardAudit(db), analytics, retention: dataRetention, subjectRequests: privacyGovernance,
         baseUrl: env.DASHBOARD.DASHBOARD_BASE_URL, trustProxy: env.DASHBOARD.DASHBOARD_TRUST_PROXY,
         secureCookies: new URL(env.DASHBOARD.DASHBOARD_BASE_URL).protocol === 'https:', logger,
         moderationGatewayForGuild: async guildId => {

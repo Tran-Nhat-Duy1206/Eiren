@@ -11,7 +11,8 @@ async function main(): Promise<void> {
   let stopServer: ReturnType<typeof setTimeout> | undefined;
   const checks: Record<string, boolean> = { database: false, healthz: false, login: false, css: false, rootRedirect: false, guildsRedirect: false, restrictiveHeaders: false, secretFree: false,
     automationAdminPage: false, automationOriginCsrf: false, automationCsp: false,
-    retentionPage: false, retentionOriginCsrf: false, retentionCsp: false };
+    retentionPage: false, retentionOriginCsrf: false, retentionCsp: false,
+    privacyPage: false, privacyOriginCsrf: false, privacyCsp: false };
   try {
     const connected = await pool.query('SELECT 1 AS ready');
     checks.database = connected.rows[0]?.ready === 1;
@@ -32,6 +33,8 @@ async function main(): Promise<void> {
         holdCounts: { ticket: 0, report: 0, appeal: 0 }, activeHolds: [], recentReceipts: [] }),
         preview: forbidden, getPreview: forbidden, confirm: forbidden, disable: forbidden,
         setHold: forbidden, clearHold: forbidden },
+      subjectRequests: { list: async () => [], recentReceipts: async () => [], inspect: forbidden,
+        preview: forbidden, confirm: forbidden, execute: forbidden, deny: forbidden, recordAuditGap: forbidden },
       auth: {
         startOAuth: forbidden, completeOAuth: forbidden, clearStateCookie: forbidden,
         clearSessionCookie: () => ({ name: 'dashboard_session', value: '', options: { path: '/', httpOnly: true, sameSite: 'lax', secure: false, maxAge: 0 } }),
@@ -100,6 +103,19 @@ async function main(): Promise<void> {
       fetch(retentionAction, { method: 'POST', signal: deadline, headers: { cookie: `dashboard_session=${localSession}`, origin: 'http://evil.example', 'content-type': 'application/x-www-form-urlencoded' }, body: 'csrfToken=local-csrf&ticketDays=90&reportDays=365&appealDays=365' }),
     ]);
     checks.retentionOriginCsrf = retentionBlocked.every(response => response.status === 403);
+    const privacyResponse = await fetch(new URL(`/g/${localGuild}/privacy`, url), { signal: deadline, headers: { cookie: `dashboard_session=${localSession}` } });
+    const privacyHtml = await privacyResponse.text();
+    checks.privacyPage = privacyResponse.status === 200 && privacyHtml.includes('Privacy requests') &&
+      privacyHtml.includes('Requests (up to 50)') && privacyHtml.includes('Recent metadata receipts (up to 50)') &&
+      privacyHtml.includes('Eiren-controlled PostgreSQL data for this guild only') && !privacyHtml.includes('name="subjectUserId"') && !privacyHtml.includes('privacy-create');
+    checks.privacyCsp = (privacyResponse.headers.get('content-security-policy') ?? '').includes("script-src 'none'") && !privacyHtml.includes('<script');
+    checks.secretFree &&= forbiddenValues.every(value => !privacyHtml.includes(value));
+    const privacyAction = new URL(`/g/${localGuild}/action/privacy-preview`, url);
+    const privacyBlocked = await Promise.all([
+      fetch(privacyAction, { method: 'POST', signal: deadline, headers: { cookie: `dashboard_session=${localSession}`, origin: 'http://127.0.0.1', 'content-type': 'application/x-www-form-urlencoded' }, body: 'csrfToken=invalid&requestId=123e4567-e89b-42d3-a456-426614174000' }),
+      fetch(privacyAction, { method: 'POST', signal: deadline, headers: { cookie: `dashboard_session=${localSession}`, origin: 'http://evil.example', 'content-type': 'application/x-www-form-urlencoded' }, body: 'csrfToken=local-csrf&requestId=123e4567-e89b-42d3-a456-426614174000' }),
+    ]);
+    checks.privacyOriginCsrf = privacyBlocked.every(response => response.status === 403);
     console.log(JSON.stringify({ url, checks, redirects: { rootStatus: root.response.status, rootLocation: root.response.headers.get('location'), guildsStatus: guilds.response.status, guildsLocation: guilds.response.headers.get('location') }, passed: Object.values(checks).every(Boolean) }));
     if (!Object.values(checks).every(Boolean)) process.exitCode = 1;
   } catch (error) {

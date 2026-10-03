@@ -1,4 +1,4 @@
-import { bigint, boolean, check, date, foreignKey, index, integer, jsonb, pgTable, primaryKey, bigserial, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, date, foreignKey, index, integer, jsonb, pgTable, primaryKey, bigserial, text, timestamp, unique, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const guilds = pgTable('guilds', {
@@ -298,7 +298,11 @@ export const ticketParticipants = pgTable('ticket_participants', {
   userId: text('user_id').notNull(),
   addedBy: text('added_by').notNull(),
   addedAt: timestamp('added_at', { withTimezone: true }).notNull().defaultNow(),
-}, table => [primaryKey({ columns: [table.ticketId, table.userId] })]);
+}, table => [
+  primaryKey({ columns: [table.ticketId, table.userId] }),
+  index('ticket_participants_subject_user_idx').on(table.userId, table.ticketId),
+  index('ticket_participants_subject_added_by_idx').on(table.addedBy, table.ticketId),
+]);
 
 export const reports = pgTable('reports', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
@@ -393,6 +397,7 @@ export const suggestionVotes = pgTable('suggestion_votes', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, table => [
   primaryKey({ columns: [table.suggestionId, table.userId] }),
+  index('suggestion_votes_subject_user_idx').on(table.userId, table.suggestionId),
   check('suggestion_votes_value_check', sql`${table.vote} IN (-1, 1)`),
 ]);
 
@@ -547,7 +552,10 @@ export const eventParticipants = pgTable('event_participants', {
   eventId: bigint('event_id', { mode: 'number' }).notNull().references(() => communityEvents.id, { onDelete: 'cascade' }),
   userId: text('user_id').notNull(),
   joinedAt: timestamp('joined_at', { withTimezone: true }).notNull().defaultNow(),
-}, table => [primaryKey({ columns: [table.eventId, table.userId] })]);
+}, table => [
+  primaryKey({ columns: [table.eventId, table.userId] }),
+  index('event_participants_subject_user_idx').on(table.userId, table.eventId),
+]);
 
 // Confirmed attendance is distinct from RSVP and only staff/organizer may record it.
 export const eventAttendance = pgTable('event_attendance', {
@@ -555,7 +563,11 @@ export const eventAttendance = pgTable('event_attendance', {
   userId: text('user_id').notNull(),
   markedBy: text('marked_by').notNull(),
   markedAt: timestamp('marked_at', { withTimezone: true }).notNull().defaultNow(),
-}, table => [primaryKey({ columns: [table.eventId, table.userId] })]);
+}, table => [
+  primaryKey({ columns: [table.eventId, table.userId] }),
+  index('event_attendance_subject_user_idx').on(table.userId, table.eventId),
+  index('event_attendance_subject_marked_by_idx').on(table.markedBy, table.eventId),
+]);
 
 export const eventReminders = pgTable('event_reminders', {
   eventId: bigint('event_id', { mode: 'number' }).notNull().references(() => communityEvents.id, { onDelete: 'cascade' }),
@@ -609,7 +621,10 @@ export const giveawayEntries = pgTable('giveaway_entries', {
   giveawayId: bigint('giveaway_id', { mode: 'number' }).notNull().references(() => giveaways.id, { onDelete: 'cascade' }),
   userId: text('user_id').notNull(),
   enteredAt: timestamp('entered_at', { withTimezone: true }).notNull().defaultNow(),
-}, table => [primaryKey({ columns: [table.giveawayId, table.userId] })]);
+}, table => [
+  primaryKey({ columns: [table.giveawayId, table.userId] }),
+  index('giveaway_entries_subject_user_idx').on(table.userId, table.giveawayId),
+]);
 
 export const giveawayDraws = pgTable('giveaway_draws', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
@@ -634,6 +649,7 @@ export const giveawayWinners = pgTable('giveaway_winners', {
   primaryKey({ columns: [table.drawId, table.userId] }),
   uniqueIndex('giveaway_winners_draw_ordinal_unique').on(table.drawId, table.ordinal),
   index('giveaway_winners_giveaway_idx').on(table.giveawayId, table.userId),
+  index('giveaway_winners_subject_user_idx').on(table.userId, table.giveawayId),
   check('giveaway_winners_ordinal_check', sql`${table.ordinal} BETWEEN 1 AND 20`),
 ]);
 
@@ -972,4 +988,137 @@ export const automationActionRuns = pgTable('automation_action_runs', {
   check('automation_action_runs_error_check', sql`${table.safeErrorCode} IS NULL OR ${table.safeErrorCode} ~ '^[A-Z_]{1,40}$'`),
   check('automation_action_runs_reconciliation_check', sql`(${table.reconciliationResult} IS NULL AND ${table.reconciledBy} IS NULL AND ${table.reconciledAt} IS NULL) OR
     (${table.reconciliationResult} IN ('CONFIRMED_SENT','CONFIRMED_NOT_SENT') AND ${table.reconciledBy} ~ '^[0-9]{17,20}$' AND ${table.reconciledAt} IS NOT NULL)`),
+]);
+
+// V8.3 request governance stores bounded identifiers/counts only, never erased content.
+export const subjectRequests = pgTable('subject_requests', {
+  id: uuid('id').primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  subjectUserId: text('subject_user_id').notNull(),
+  status: text('status').notNull().default('PENDING'),
+  version: integer('version').notNull().default(0),
+  requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  subjectVerifiedAt: timestamp('subject_verified_at', { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  verificationMethod: text('verification_method').notNull().default('SELF_GUILD_MEMBER'),
+  previewedBy: text('previewed_by'),
+  previewedAt: timestamp('previewed_at', { withTimezone: true }),
+  confirmedBy: text('confirmed_by'),
+  confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+  confirmedPreviewId: uuid('confirmed_preview_id'),
+  executedAt: timestamp('executed_at', { withTimezone: true }),
+  deniedBy: text('denied_by'),
+  deniedAt: timestamp('denied_at', { withTimezone: true }),
+  denialCode: text('denial_code'),
+  terminalAt: timestamp('terminal_at', { withTimezone: true }),
+}, table => [
+  unique('subject_requests_guild_id_subject_unique').on(table.guildId, table.id, table.subjectUserId),
+  uniqueIndex('subject_requests_active_subject_unique').on(table.guildId, table.subjectUserId)
+    .where(sql`${table.status} IN ('PENDING','PREVIEWED','CONFIRMED','EXECUTING')`),
+  index('subject_requests_guild_recent_idx').on(table.guildId, table.requestedAt.desc(), table.id.desc()),
+  index('subject_requests_subject_latest_idx').on(table.guildId, table.subjectUserId, table.requestedAt.desc(), table.id.desc()),
+  index('subject_requests_terminal_expiry_idx').on(table.terminalAt, table.id).where(sql`${table.terminalAt} IS NOT NULL`),
+  check('subject_requests_subject_check', sql`${table.subjectUserId} ~ '^[0-9]{17,20}$'`),
+  check('subject_requests_actors_check', sql`(${table.previewedBy} IS NULL OR ${table.previewedBy} ~ '^[0-9]{17,20}$') AND
+    (${table.confirmedBy} IS NULL OR ${table.confirmedBy} ~ '^[0-9]{17,20}$') AND
+    (${table.deniedBy} IS NULL OR ${table.deniedBy} ~ '^[0-9]{17,20}$')`),
+  check('subject_requests_status_check', sql`${table.status} IN ('PENDING','PREVIEWED','CONFIRMED','EXECUTING','COMPLETED','PARTIAL','DENIED')`),
+  check('subject_requests_version_check', sql`${table.version} >= 0`),
+  check('subject_requests_verification_check', sql`${table.verificationMethod} = 'SELF_GUILD_MEMBER'`),
+  check('subject_requests_denial_code_check', sql`${table.denialCode} IS NULL OR ${table.denialCode} IN ('NO_ELIGIBLE_DATA','ACCOUNTABILITY_REQUIRED','ACTIVE_OR_UNRESOLVED_STATE','OUT_OF_SCOPE','POLICY_RETAINED')`),
+  check('subject_requests_preview_pair_check', sql`(${table.previewedBy} IS NULL AND ${table.previewedAt} IS NULL) OR
+    (${table.previewedBy} IS NOT NULL AND ${table.previewedAt} IS NOT NULL)`),
+  check('subject_requests_confirmation_pair_check', sql`(${table.confirmedBy} IS NULL AND ${table.confirmedAt} IS NULL AND ${table.confirmedPreviewId} IS NULL) OR
+    (${table.confirmedBy} IS NOT NULL AND ${table.confirmedAt} IS NOT NULL AND ${table.confirmedPreviewId} IS NOT NULL)`),
+  check('subject_requests_denial_pair_check', sql`(${table.deniedBy} IS NULL AND ${table.deniedAt} IS NULL AND ${table.denialCode} IS NULL) OR
+    (${table.deniedBy} IS NOT NULL AND ${table.deniedAt} IS NOT NULL AND ${table.denialCode} IS NOT NULL)`),
+  check('subject_requests_lifecycle_check', sql`
+    (${table.status} = 'PENDING' AND ${table.previewedBy} IS NULL AND ${table.confirmedBy} IS NULL AND ${table.deniedBy} IS NULL AND ${table.executedAt} IS NULL AND ${table.terminalAt} IS NULL) OR
+    (${table.status} = 'PREVIEWED' AND ${table.previewedBy} IS NOT NULL AND ${table.confirmedBy} IS NULL AND ${table.deniedBy} IS NULL AND ${table.executedAt} IS NULL AND ${table.terminalAt} IS NULL) OR
+    (${table.status} IN ('CONFIRMED','EXECUTING') AND ${table.previewedBy} IS NOT NULL AND ${table.confirmedBy} IS NOT NULL AND ${table.deniedBy} IS NULL AND ${table.executedAt} IS NULL AND ${table.terminalAt} IS NULL) OR
+    (${table.status} IN ('COMPLETED','PARTIAL') AND ${table.previewedBy} IS NOT NULL AND ${table.confirmedBy} IS NOT NULL AND ${table.deniedBy} IS NULL AND ${table.executedAt} IS NOT NULL AND ${table.terminalAt} IS NOT NULL) OR
+    (${table.status} = 'DENIED' AND ${table.deniedBy} IS NOT NULL AND ${table.executedAt} IS NULL AND ${table.terminalAt} IS NOT NULL)`),
+]);
+
+export const subjectRequestPreviews = pgTable('subject_request_previews', {
+  id: uuid('id').primaryKey(),
+  requestId: uuid('request_id').notNull(),
+  guildId: text('guild_id').notNull(),
+  subjectUserId: text('subject_user_id').notNull(),
+  reviewedBy: text('reviewed_by').notNull(),
+  requestVersion: integer('request_version').notNull(),
+  inventoryHash: text('inventory_hash').notNull(),
+  eligibleTotal: integer('eligible_total').notNull(),
+  retainedTotal: integer('retained_total').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  consumedAt: timestamp('consumed_at', { withTimezone: true }),
+}, table => [
+  foreignKey({ columns: [table.guildId, table.requestId, table.subjectUserId], foreignColumns: [subjectRequests.guildId, subjectRequests.id, subjectRequests.subjectUserId], name: 'subject_request_previews_request_subject_fk' }).onDelete('cascade'),
+  index('subject_request_previews_request_recent_idx').on(table.guildId, table.requestId, table.createdAt.desc()),
+  index('subject_request_previews_expiry_idx').on(table.expiresAt),
+  index('subject_request_previews_consumed_idx').on(table.consumedAt).where(sql`${table.consumedAt} IS NOT NULL`),
+  check('subject_request_previews_actors_check', sql`${table.subjectUserId} ~ '^[0-9]{17,20}$' AND ${table.reviewedBy} ~ '^[0-9]{17,20}$'`),
+  check('subject_request_previews_version_check', sql`${table.requestVersion} >= 0`),
+  check('subject_request_previews_hash_check', sql`${table.inventoryHash} ~ '^[0-9a-f]{64}$'`),
+  check('subject_request_previews_counts_check', sql`${table.eligibleTotal} >= 0 AND ${table.retainedTotal} >= 0`),
+  check('subject_request_previews_expiry_check', sql`${table.expiresAt} > ${table.createdAt} AND (${table.consumedAt} IS NULL OR ${table.consumedAt} >= ${table.createdAt})`),
+]);
+
+export const subjectRequestPreviewCounts = pgTable('subject_request_preview_counts', {
+  previewId: uuid('preview_id').notNull(),
+  disposition: text('disposition').notNull(),
+  category: text('category').notNull(),
+  count: integer('count').notNull(),
+}, table => [
+  primaryKey({ columns: [table.previewId, table.disposition, table.category] }),
+  foreignKey({ columns: [table.previewId], foreignColumns: [subjectRequestPreviews.id], name: 'subject_request_preview_counts_preview_fk' }).onDelete('cascade'),
+  check('subject_request_preview_counts_disposition_check', sql`${table.disposition} IN ('ERASE','RETAIN')`),
+  check('subject_request_preview_counts_category_check', sql`${table.category} IN ('MEMBER_LEVEL_STATE','MEMBER_REPUTATION_AGGREGATE','ACHIEVEMENT_AWARDS','TERMINAL_EVENT_PARTICIPATION','TERMINAL_EVENT_ATTENDANCE','MODERATION_ACCOUNTABILITY','REPORT_APPEAL_EVIDENCE','TICKET_ACCOUNTABILITY','VERIFICATION_ACCESS_STATE','ANTI_ABUSE_OR_REPLAY','REPUTATION_GRANT_HISTORY','SUGGESTION_HISTORY','STARBOARD_HISTORY','EVENT_CREATOR_ACCOUNTABILITY','EVENT_STAFF_ACCOUNTABILITY','ACTIVE_EVENT_STATE','UNRESOLVED_EVENT_PRESENTATION','GIVEAWAY_HISTORY','TEMPVOICE_OPERATIONAL_STATE','ANALYTICS_OPERATIONAL_STATE','GOVERNANCE_AUDIT','RETENTION_GOVERNANCE','AI_ACCOUNTING','AUTOMATION_ACCOUNTABILITY','AUTOMATION_UNCERTAIN','CONFIGURATION_ACCOUNTABILITY','OUT_OF_SCOPE','PRIVACY_GOVERNANCE')`),
+  check('subject_request_preview_counts_count_check', sql`${table.count} >= 0`),
+]);
+
+export const subjectExecutionReceipts = pgTable('subject_execution_receipts', {
+  requestId: uuid('request_id').primaryKey(),
+  guildId: text('guild_id').notNull(),
+  subjectUserId: text('subject_user_id').notNull(),
+  confirmedBy: text('confirmed_by').notNull(),
+  executedBy: text('executed_by').notNull(),
+  inventoryHash: text('inventory_hash').notNull(),
+  executedAt: timestamp('executed_at', { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  outcome: text('outcome').notNull(),
+  requestVersion: integer('request_version').notNull(),
+  deletedMemberLevels: integer('deleted_member_levels').notNull(),
+  deletedMemberReputation: integer('deleted_member_reputation').notNull(),
+  deletedAchievements: integer('deleted_achievements').notNull(),
+  deletedEventParticipants: integer('deleted_event_participants').notNull(),
+  deletedEventAttendance: integer('deleted_event_attendance').notNull(),
+  retainedTotal: integer('retained_total').notNull(),
+}, table => [
+  foreignKey({ columns: [table.guildId, table.requestId, table.subjectUserId], foreignColumns: [subjectRequests.guildId, subjectRequests.id, subjectRequests.subjectUserId], name: 'subject_execution_receipts_request_subject_fk' }).onDelete('cascade'),
+  index('subject_execution_receipts_guild_recent_idx').on(table.guildId, table.executedAt.desc()),
+  index('subject_execution_receipts_time_idx').on(table.executedAt),
+  check('subject_execution_receipts_actors_check', sql`${table.subjectUserId} ~ '^[0-9]{17,20}$' AND ${table.confirmedBy} ~ '^[0-9]{17,20}$' AND ${table.executedBy} ~ '^[0-9]{17,20}$'`),
+  check('subject_execution_receipts_hash_check', sql`${table.inventoryHash} ~ '^[0-9a-f]{64}$'`),
+  check('subject_execution_receipts_version_check', sql`${table.requestVersion} >= 0`),
+  check('subject_execution_receipts_counts_check', sql`${table.deletedMemberLevels} BETWEEN 0 AND 1 AND ${table.deletedMemberReputation} BETWEEN 0 AND 1 AND ${table.deletedAchievements} >= 0 AND ${table.deletedEventParticipants} >= 0 AND ${table.deletedEventAttendance} >= 0 AND ${table.retainedTotal} >= 0`),
+  check('subject_execution_receipts_outcome_check', sql`(${table.outcome} = 'COMPLETED' AND ${table.retainedTotal} = 0) OR (${table.outcome} = 'PARTIAL' AND ${table.retainedTotal} > 0)`),
+]);
+
+export const governanceAuditGaps = pgTable('governance_audit_gaps', {
+  id: uuid('id').primaryKey(),
+  guildId: text('guild_id').notNull().references(() => guilds.id, { onDelete: 'cascade' }),
+  actorUserId: text('actor_user_id').notNull(),
+  action: text('action').notNull(),
+  targetType: text('target_type').notNull(),
+  targetId: text('target_id'),
+  requestId: text('request_id').notNull(),
+  committedAt: timestamp('committed_at', { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  detectedAt: timestamp('detected_at', { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, table => [
+  index('governance_audit_gaps_guild_recent_idx').on(table.guildId, table.detectedAt.desc()),
+  index('governance_audit_gaps_time_idx').on(table.detectedAt),
+  check('governance_audit_gaps_actor_check', sql`${table.actorUserId} ~ '^[0-9]{17,20}$'`),
+  check('governance_audit_gaps_action_check', sql`${table.action} IN ('privacy-preview','privacy-confirm','privacy-execute','privacy-deny','retention-confirm','retention-disable','retention-hold-set','retention-hold-clear') AND ${table.targetType} = ${table.action}`),
+  check('governance_audit_gaps_target_check', sql`${table.targetId} IS NULL OR ${table.targetId} ~ '^[A-Za-z0-9_-]{1,128}$'`),
+  check('governance_audit_gaps_request_check', sql`${table.requestId} ~ '^[A-Za-z0-9_-]{1,128}$'`),
 ]);
