@@ -1,4 +1,5 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import { safeMentions } from '../../core/presentation/index.js';
 import { AppError } from '../../core/errors/errors.js';
 import type { Command } from '../../core/commands/command.js';
 import type { Actor, PermissionLevel } from '../../core/permissions/permission-service.js';
@@ -50,17 +51,17 @@ export const reportCommands: Command[] = [
         const item = await services.reports.submitReport(actor, { category: interaction.options.getString('category', true),
           description: interaction.options.getString('description', true), reportedUserId: interaction.options.getUser('user')?.id,
           evidenceUrl: interaction.options.getString('evidence_url') });
-        await interaction.editReply({ content: `Private report #${item.id} submitted for staff review.` });
+        await interaction.editReply({ allowedMentions: safeMentions, content: `Private report #${item.id} submitted for staff review.` });
       } else if (sub === 'list') {
         const items = await services.reports.listReports(actor);
-        await interaction.editReply({ content: items.length ? items.map(item => `#${item.id} ${safe(item.status)} · ${safe(item.category.slice(0, 60))}`).join('\n') : 'No reports.' });
+        await interaction.editReply({ allowedMentions: safeMentions, content: items.length ? items.map(item => `#${item.id} ${safe(item.status)} · ${safe(item.category.slice(0, 60))}`).join('\n') : 'No reports.' });
       } else if (sub === 'view') {
         const item = await services.reports.getReport(actor, interaction.options.getInteger('id', true));
         const redacted = item.narrativeRedactedAt !== null;
-        await interaction.editReply({ content: `Report #${item.id} (${item.status})\nReporter: ${item.reporterId}\nReported user: ${item.reportedUserId ?? 'Not specified'}\nCategory: ${safe(item.category)}\nDescription: ${redacted ? 'Content redacted by retention policy.' : safe((item.description ?? '').slice(0, 1200))}\nEvidence: ${redacted ? 'Content redacted by retention policy.' : safe((item.evidenceUrl ?? 'None').slice(0, 200))}\nResolution: ${redacted ? 'Content redacted by retention policy.' : safe((item.resolutionNote ?? 'None').slice(0, 200))}`, allowedMentions: { parse: [] } });
+        await interaction.editReply({ allowedMentions: safeMentions, content: `Report #${item.id} (${item.status})\nReporter: ${item.reporterId}\nReported user: ${item.reportedUserId ?? 'Not specified'}\nCategory: ${safe(item.category)}\nDescription: ${redacted ? 'Content redacted by retention policy.' : safe((item.description ?? '').slice(0, 1200))}\nEvidence: ${redacted ? 'Content redacted by retention policy.' : safe((item.evidenceUrl ?? 'None').slice(0, 200))}\nResolution: ${redacted ? 'Content redacted by retention policy.' : safe((item.resolutionNote ?? 'None').slice(0, 200))}` });
       } else {
         const item = await services.reports.closeReport(actor, interaction.options.getInteger('id', true), interaction.options.getString('note', true));
-        await interaction.editReply({ content: `Report #${item.id} closed. No automatic moderation action was taken.` });
+        await interaction.editReply({ allowedMentions: safeMentions, content: `Report #${item.id} closed. No automatic moderation action was taken.` });
       }
     } },
   { data: appealData, moduleKey: 'reports', requiredLevel: required,
@@ -69,19 +70,19 @@ export const reportCommands: Command[] = [
       const sub = interaction.options.getSubcommand();
       if (sub === 'submit') {
         const item = await services.reports.submitAppeal(actor, { reason: interaction.options.getString('reason', true), caseId: interaction.options.getInteger('case_id') });
-        await interaction.editReply({ content: `Private appeal #${item.id} submitted for staff review.` });
+        await interaction.editReply({ allowedMentions: safeMentions, content: `Private appeal #${item.id} submitted for staff review.` });
       } else if (sub === 'list') {
         const items = await services.reports.listAppeals(actor);
-        await interaction.editReply({ content: items.length ? items.map(item => `#${item.id} ${item.status} · case ${item.caseId ?? 'not specified'}`).join('\n') : 'No appeals.' });
+        await interaction.editReply({ allowedMentions: safeMentions, content: items.length ? items.map(item => `#${item.id} ${item.status} · case ${item.caseId ?? 'not specified'}`).join('\n') : 'No appeals.' });
       } else if (sub === 'view') {
         const item = await services.reports.getAppeal(actor, interaction.options.getInteger('id', true));
         const redacted = item.narrativeRedactedAt !== null;
-        await interaction.editReply({ content: `Appeal #${item.id} (${item.status})\nAppellant: ${item.appellantId}\nCase: ${item.caseId ?? 'Not specified'}\nReason: ${redacted ? 'Content redacted by retention policy.' : safe((item.reason ?? '').slice(0, 1400))}\nReview note: ${redacted ? 'Content redacted by retention policy.' : safe((item.reviewNote ?? 'None').slice(0, 300))}`, allowedMentions: { parse: [] } });
+        await interaction.editReply({ allowedMentions: safeMentions, content: `Appeal #${item.id} (${item.status})\nAppellant: ${item.appellantId}\nCase: ${item.caseId ?? 'Not specified'}\nReason: ${redacted ? 'Content redacted by retention policy.' : safe((item.reason ?? '').slice(0, 1400))}\nReview note: ${redacted ? 'Content redacted by retention policy.' : safe((item.reviewNote ?? 'None').slice(0, 300))}` });
       } else {
         const decision = interaction.options.getString('decision', true);
         if (decision !== 'ACCEPTED' && decision !== 'REJECTED') throw new AppError('VALIDATION', 'Invalid decision.');
         const item = await services.reports.reviewAppeal(actor, interaction.options.getInteger('id', true), decision, interaction.options.getString('note', true));
-        await interaction.editReply({ content: `Appeal #${item.id} marked ${item.status}. No automatic reversal was performed.` });
+        await interaction.editReply({ allowedMentions: safeMentions, content: `Appeal #${item.id} marked ${item.status}. No automatic reversal was performed.` });
       }
     } },
 ];

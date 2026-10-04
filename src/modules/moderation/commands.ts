@@ -1,4 +1,5 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import { discordTimestamp, safeMentions } from '../../core/presentation/index.js';
 import { AppError } from '../../core/errors/errors.js';
 import type { Command } from '../../core/commands/command.js';
 import type { Actor, PermissionLevel } from '../../core/permissions/permission-service.js';
@@ -64,12 +65,12 @@ export const modCommand: Command = {
     const sub = interaction.options.getSubcommand();
     if (sub === 'case') {
       const record = await services.moderation.getCase(actor, interaction.options.getInteger('id', true));
-      await interaction.editReply({ content: `Case #${record.id} — ${record.action} (${record.status})\nTarget: ${record.targetId}\nModerator: ${record.moderatorId}\nReason: ${record.reason}\nCreated: ${record.createdAt.toISOString()}${record.expiresAt ? `\nExpires: ${record.expiresAt.toISOString()}` : ''}` });
+      await interaction.editReply({ allowedMentions: safeMentions, content: `Case #${record.id} — ${record.action} (${record.status})\nTarget: ${record.targetId}\nModerator: ${record.moderatorId}\nReason: ${record.reason}\nCreated: ${discordTimestamp(record.createdAt)}${record.expiresAt ? `\nExpires: ${discordTimestamp(record.expiresAt)}` : ''}` });
       return;
     }
     if (sub === 'history') {
       const records = await services.moderation.history(actor, target(interaction));
-      await interaction.editReply({ content: records.length ? records.map(record => `#${record.id} ${record.action} ${record.status}: ${record.reason.slice(0, 100)}`).join('\n') : 'No cases for that user.' });
+      await interaction.editReply({ allowedMentions: safeMentions, content: records.length ? records.map(record => `#${record.id} ${record.action} ${record.status}: ${record.reason.slice(0, 100)}`).join('\n') : 'No cases for that user.' });
       return;
     }
     if (sub === 'note') {
@@ -77,10 +78,10 @@ export const modCommand: Command = {
       const text = interaction.options.getString('text');
       if (!text) {
         const notes = await services.moderation.notes(actor, userId);
-        await interaction.editReply({ content: notes.length ? notes.map(note => `#${note.id} (${note.moderatorId}): ${note.content.slice(0, 140)}`).join('\n') : 'No staff notes for that user.' });
+        await interaction.editReply({ allowedMentions: safeMentions, content: notes.length ? notes.map(note => `#${note.id} (${note.moderatorId}): ${note.content.slice(0, 140)}`).join('\n') : 'No staff notes for that user.' });
       } else {
         const note = await services.moderation.addNote(actor, userId, text);
-        await interaction.editReply({ content: `Private staff note #${note.id} saved.` });
+        await interaction.editReply({ allowedMentions: safeMentions, content: `Private staff note #${note.id} saved.` });
       }
       return;
     }
@@ -90,7 +91,7 @@ export const modCommand: Command = {
     const metadata = sub === 'purge' ? { channelId: interaction.channelId, count: interaction.options.getInteger('count', true) } : undefined;
     const record = await services.moderation.perform({ actor, action, targetId, reason: interaction.options.getString('reason', true), durationSeconds: duration, metadata },
       new DiscordModerationGateway(interaction.guild, actor.userId));
-    await interaction.editReply({ content: `Case #${record.id}: ${record.action} ${record.status}${record.metadata.deletedCount !== undefined ? `; deleted ${record.metadata.deletedCount} messages` : ''}.` });
+    await interaction.editReply({ allowedMentions: safeMentions, content: `Case #${record.id}: ${record.action} ${record.status}${record.metadata.deletedCount !== undefined ? `; deleted ${record.metadata.deletedCount} messages` : ''}.` });
   },
 };
 export const moderationCommands = [modCommand];

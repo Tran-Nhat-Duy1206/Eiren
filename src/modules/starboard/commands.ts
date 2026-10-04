@@ -1,4 +1,5 @@
 import { ChannelType, SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import { safeMentions } from '../../core/presentation/index.js';
 import type { Command } from '../../core/commands/command.js';
 import type { Actor } from '../../core/permissions/permission-service.js';
 import type { Services } from '../../app/services.js';
@@ -26,7 +27,7 @@ export const starboardCommands: Command[] = [{
     const action = interaction.options.getSubcommand();
     if (action === 'ignore-channel' || action === 'allow-channel') {
       await services.starboard.ignore(actor, interaction.options.getChannel('channel', true).id, action === 'ignore-channel');
-      await interaction.editReply({ content: 'Starboard channel filter updated.' });
+      await interaction.editReply({ content: 'Starboard channel filter updated.', allowedMentions: safeMentions });
       return;
     }
     const changes = action === 'enable' ? { enabled: true } : action === 'disable' ? { enabled: false } :
@@ -35,6 +36,6 @@ export const starboardCommands: Command[] = [{
       action === 'emoji' ? { emoji: interaction.options.getString('emoji', true) } :
       action === 'self-star' ? { allowSelf: interaction.options.getBoolean('allow', true) } : null;
     const settings = changes ? await services.starboard.configure(actor, changes) : await services.starboard.settings(actor);
-    await interaction.editReply({ content: settings ? `Starboard ${settings.enabled ? 'enabled' : 'disabled'} · channel ${settings.channelId ? `<#${settings.channelId}>` : 'none'} · ${settings.emoji} ${settings.threshold} · self-stars ${settings.allowSelf ? 'on' : 'off'}` : 'Starboard not configured.', allowedMentions: { parse: [] } });
+    await interaction.editReply({ content: settings ? `Starboard ${settings.enabled ? 'enabled' : 'disabled'} · channel ${settings.channelId ? `<#${settings.channelId}>` : 'none'} · ${settings.emoji} ${settings.threshold} · self-stars ${settings.allowSelf ? 'on' : 'off'}` : 'Starboard not configured.', allowedMentions: safeMentions });
   },
 }];

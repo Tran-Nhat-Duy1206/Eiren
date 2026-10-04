@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { eventPost } from './discord-gateway.js';
+import { DiscordEventGateway, eventPost, eventTimestamp } from './discord-gateway.js';
+import { presentationColor } from '../../core/presentation/index.js';
 import { parseEventTime, EventService } from './service.js';
 import type { CommunityEvent, EventRepository } from './repository.js';
 const actor = { guildId: 'g', userId: 'owner', guildOwnerId: 'owner', roleIds: [] };
@@ -23,6 +24,23 @@ function setup() {
   return { repository, gateway, hooks, service };
 }
 describe('community events', () => {
+  it('uses semantic colors without changing content or persistent RSVP IDs', () => {
+    const payload = eventPost({ ...row, title: 'Member title <@123>', description: 'Original narrative' }, 1);
+    expect(payload.embeds[0]!.toJSON()).toMatchObject({ title: 'Member title <@123>', description: 'Original narrative', color: presentationColor('INFO') });
+    expect(payload.components[0]!.components.map(button => { const data = button.toJSON(); return 'custom_id' in data ? data.custom_id : undefined; })).toEqual(['event:join:2', 'event:leave:2']);
+    expect(eventTimestamp(new Date(1999))).toBe('<t:1:F>');
+    expect(eventPost({ ...row, status: 'CANCELLED' }, 1).embeds[0]!.toJSON().color).toBe(presentationColor('DISABLED'));
+    expect(eventPost({ ...row, status: 'COMPLETED' }, 1).components).toEqual([]);
+  });
+  it('edits the original event message without replacing RSVP identities', async () => {
+    const edit = vi.fn(async () => {});
+    const channel = { isTextBased: () => true, send: vi.fn(), messages: { edit } };
+    const gateway = new DiscordEventGateway({ channels: { fetch: vi.fn(async () => channel) } } as never);
+    await gateway.update('c', 'm', row, 2);
+    expect(edit).toHaveBeenCalledWith('m', expect.objectContaining({ allowedMentions: { parse: [] } }));
+    const payload = edit.mock.calls[0] as unknown as [string, ReturnType<typeof eventPost>];
+    expect(payload[1].components[0]!.components.map(button => { const data = button.toJSON(); return 'custom_id' in data ? data.custom_id : undefined; })).toEqual(['event:join:2', 'event:leave:2']);
+  });
   it('requires an explicit timezone and renders Discord timestamps with safe components', () => {
     expect(() => parseEventTime('2030-01-01T12:00:00')).toThrow();
     expect(parseEventTime('2030-01-01T12:00:00+02:00').toISOString()).toBe('2030-01-01T10:00:00.000Z');

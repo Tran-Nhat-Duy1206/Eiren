@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SuggestionService } from './service.js';
 import { SuggestionRepository } from './repository.js';
+import { DiscordSuggestionGateway, suggestionPost } from './discord-gateway.js';
+import { presentationColor } from '../../core/presentation/index.js';
+import { ButtonStyle } from 'discord.js';
 
 const row = { id: 3, guildId: 'guild', authorId: 'author', content: 'An idea', status: 'PENDING',
   channelId: 'channel', messageId: 'message', staffResponse: null, reviewedBy: null,
@@ -31,6 +34,25 @@ function setup() {
 }
 const actor = { guildId: 'guild', userId: 'staff', guildOwnerId: 'owner', roleIds: [] };
 describe('suggestion voting and review', () => {
+  it('preserves narrative, response, votes and persistent IDs with semantic review colors', () => {
+    const payload = suggestionPost({ ...row, content: 'Original <@123> idea', staffResponse: 'Original response', status: 'ACCEPTED' }, { up: 2, down: 1 });
+    expect(payload.embeds[0]!.toJSON()).toMatchObject({ description: 'Original <@123> idea', color: presentationColor('SUCCESS'), fields: [
+      { name: 'Status', value: 'ACCEPTED' }, { name: 'Votes', value: '👍 2 · 👎 1' }, { name: 'Staff response', value: 'Original response' },
+    ] });
+    expect(payload.allowedMentions).toEqual({ parse: [] });
+    expect(payload.components[0]!.components.map(button => { const data = button.toJSON(); return 'custom_id' in data ? data.custom_id : undefined; })).toEqual(['suggest:up:3', 'suggest:down:3']);
+    expect(payload.components[0]!.components[1]!.toJSON().style).toBe(ButtonStyle.Secondary);
+    expect(suggestionPost({ ...row, status: 'REJECTED' }, { up: 0, down: 0 }).embeds[0]!.toJSON().color).toBe(presentationColor('ERROR'));
+  });
+  it('edits the original persistent suggestion with the same component schema', async () => {
+    const edit = vi.fn(async () => {});
+    const channel = { isTextBased: () => true, send: vi.fn(), messages: { edit } };
+    const gateway = new DiscordSuggestionGateway({ channels: { fetch: vi.fn(async () => channel) } } as never);
+    await gateway.update('channel', 'message', row, { up: 1, down: 0 });
+    expect(edit).toHaveBeenCalledWith('message', expect.objectContaining({ allowedMentions: { parse: [] } }));
+    const payload = edit.mock.calls[0] as unknown as [string, ReturnType<typeof suggestionPost>];
+    expect(payload[1].components[0]!.components.map(button => { const data = button.toJSON(); return 'custom_id' in data ? data.custom_id : undefined; })).toEqual(['suggest:up:3', 'suggest:down:3']);
+  });
   it('retains intended channel and reports pending when posting fails', async () => {
     const { service, gateway, repository, logger } = setup();
     gateway.post.mockRejectedValue(new Error('offline'));

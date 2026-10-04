@@ -15,6 +15,7 @@ import type { DashboardAccess } from './access/dashboard-access.js';
 import type { DashboardReadService } from './data/dashboard-read-service.js';
 import { AppError } from '../core/errors/errors.js';
 import { renderLogin, renderGuildPicker, renderPage, dashboardCss } from './ui.js';
+import { noticeForPage, noticeKeyForAction } from './notices.js';
 import type { RetentionView, RetentionPreview } from './retention-ui.js';
 import type { PrivacyDashboardView } from './privacy-ui.js';
 import { toPublicReadiness, type ReadinessService } from '../core/operations/readiness.js';
@@ -306,11 +307,12 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
     else if (page === 'events') data = await deps.read.events(guildId);
     else if (page === 'giveaways') data = await deps.read.giveaways(guildId);
     else data = await deps.read.botSettings(guildId);
-    const query = request.query as { range?: string; userId?: string };
+    const query = request.query as { range?: string; userId?: string; notice?: unknown };
     return reply.type('text/html').send(renderPage({ page, guildId, guildName,
       csrfToken: deps.auth.csrfToken(cookieHeader(request.headers.cookie, deps.auth.clearSessionCookie().name)) ?? '', data,
       analyticsEnabled: page !== 'analytics' || await deps.services.modules.isEnabled(guildId, 'analytics'),
       actorLevel: await deps.services.permissions.resolve(actor),
+      notice: noticeForPage(page, query.notice),
       range: page === 'analytics' && ['24h', '7d', '30d', '90d'].includes(query.range ?? '') ? query.range : undefined,
       userId: page === 'members' && snowflake.safeParse(query.userId).success ? query.userId : undefined,
       retentionPreview,
@@ -353,7 +355,8 @@ export async function createDashboardServer(deps: DashboardWebDeps): Promise<Fas
           } else deps.logger?.error({ requestId: request.id, action: name, errorType: 'AuditGapUnavailable' }, 'Dashboard audit gap persistence unavailable');
         }
       }
-      return reply.redirect(`/g/${guildId}/${action.page}${privacyActions.has(name!) ? `?requestId=${encodeURIComponent(privacyId.parse(body.requestId))}` : name === 'retention-preview' ? `?previewId=${encodeURIComponent((outcome as RetentionPreview).id)}` : ''}`, 303);
+      const noticeKey = noticeKeyForAction(name!);
+      return reply.redirect(`/g/${guildId}/${action.page}${privacyActions.has(name!) ? `?requestId=${encodeURIComponent(privacyId.parse(body.requestId))}` : name === 'retention-preview' ? `?previewId=${encodeURIComponent((outcome as RetentionPreview).id)}` : noticeKey ? `?notice=${noticeKey}` : ''}`, 303);
     } catch (error) {
       if (attempted && !succeeded && actor) {
         try { await deps.audit.record({ guildId, actorUserId: actor.userId, action: name!, targetType: name!, ...(privacyAuditTarget ? { targetId: privacyAuditTarget } : {}), success: false, requestId: request.id }); }

@@ -1,4 +1,5 @@
 import { ChannelType, SlashCommandBuilder } from 'discord.js';
+import { boundedEmbed, presentationColor, safeMentions } from '../../core/presentation/index.js';
 import type { Command } from '../../core/commands/command.js';
 import { AppError } from '../../core/errors/errors.js';
 
@@ -10,7 +11,7 @@ export const rankCommand: Command = {
   async execute(interaction, services) {
     const user = interaction.options.getUser('user') ?? interaction.user;
     const rank = await services.levels.rank(guild(interaction.guildId), user.id);
-    await interaction.editReply({ content: rank ? `<@${user.id}>: level ${rank.level}, ${rank.xp} XP, ${rank.nextLevelXp === null ? 'maximum safe XP level' : `${rank.progress}/${rank.nextLevelXp} toward next level`}, rank ${rank.rank === null ? 'unranked' : `#${rank.rank}`} (${rank.messageCount} XP-worthy messages).` : 'No XP earned yet.', allowedMentions: { parse: [] } });
+    await interaction.editReply({ content: rank ? `<@${user.id}>: level ${rank.level}, ${rank.xp} XP, ${rank.nextLevelXp === null ? 'maximum safe XP level' : `${rank.progress}/${rank.nextLevelXp} toward next level`}, rank ${rank.rank === null ? 'unranked' : `#${rank.rank}`} (${rank.messageCount} XP-worthy messages).` : 'No XP earned yet.', allowedMentions: safeMentions });
   },
 };
 export const leaderboardCommand: Command = {
@@ -18,7 +19,9 @@ export const leaderboardCommand: Command = {
   data: new SlashCommandBuilder().setName('leaderboard').setDescription('Show the top 10 members by XP'),
   async execute(interaction, services) {
     const rows = await services.levels.leaderboard(guild(interaction.guildId));
-    await interaction.editReply({ content: rows.length ? rows.map(row => `#${row.rank} <@${row.userId}> — level ${row.level}, ${row.xp} XP`).join('\n') : 'No XP earned yet.', allowedMentions: { parse: [] } });
+    await interaction.editReply(rows.length
+      ? { embeds: [boundedEmbed({ title: 'XP leaderboard', color: presentationColor('INFO'), description: rows.map(row => `#${row.rank} <@${row.userId}> — level ${row.level}, ${row.xp} XP`).join('\n') })], allowedMentions: safeMentions }
+      : { content: 'No XP earned yet.', allowedMentions: safeMentions });
   },
 };
 export const levelsCommand: Command = {
@@ -68,7 +71,7 @@ export const levelsCommand: Command = {
     } else if (sub === 'allow-channel') {
       await services.levels.allow(id, o.getChannel('channel', true).id); text = 'Channel allowed.';
     } else throw new AppError('VALIDATION', 'Unknown levels command.');
-    await interaction.editReply({ content: text, allowedMentions: { parse: [] } });
+    await interaction.editReply({ content: text, allowedMentions: safeMentions });
   },
 };
 export const levelsCommands: Command[] = [rankCommand, leaderboardCommand, levelsCommand];

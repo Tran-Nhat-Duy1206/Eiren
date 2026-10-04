@@ -56,3 +56,11 @@ A subject request must inventory references by guild and distinguish the request
 - Readiness reads connectivity/current migration metadata and live gateway/scheduler freshness. It never migrates, repairs, retries, restarts or executes governance workflows. `/healthz` remains cheap liveness only.
 - Scheduler/startup timestamps and safe failure categories are process-memory telemetry **since process restart**, not durable history or proof that every job/row succeeded. Missing evidence is explicitly NOT_TRACKED, including production backups, external TLS/proxy health, actual Discord channel orphans and pre-restart scheduler failures.
 - ADMIN+ Operations uses guild-scoped count/time metadata, no private payload. Automation UNCERTAIN and governance gaps preserve their existing meanings; links reuse existing guarded workflows without new mutation controls. Existing authentication session housekeeping is unchanged. See `docs/OPERATIONS.md`; V8.5/V8.6 remain separate.
+
+## V8.5 presentation invariants (no policy amendment)
+
+- Existing V8.2/V8.3 authority, eligible/retained categories, holds, windows, phrases and point-in-time fences are unchanged. UI visibility is never authorization; direct server checks remain authoritative.
+- Semantic status text survives without color: Uncertain is WARNING and an unproven external side effect, not Failed or permission to retry. Disabled is neutral, not Failed. Committed/audit-unconfirmed is not a failed domain mutation; do not repeat it.
+- Operational IDs remain available as secondary metadata. NOT_TRACKED/UNAVAILABLE do not imply healthy/zero. Since-process-restart telemetry and all four unknown boundaries stay explicit.
+- Database-only retention and limited point-in-time eligible erasure/accountability/external-copy/future-activity warnings remain visible, including consequence text near destructive controls. Styling adds no confirmation requirement or business action.
+- No dashboard JavaScript/CSP relaxation, schema/migration/dependency change, new Discord custom ID/ping intent, narrative rewriting or recovery control follows. V8.6 remains separate and unimplemented. See `UI-DESIGN.md`.

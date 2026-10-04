@@ -1,5 +1,7 @@
 import { ChannelType, DiscordAPIError, PermissionFlagsBits, type Client } from 'discord.js';
 
+import { safeMentions } from '../../core/presentation/index.js';
+
 export type AutomationDelivery = Readonly<{ kind: 'READY'; send(message: string): Promise<string> }>;
 export type AutomationPreflight = AutomationDelivery | Readonly<{ kind: 'BLOCKED'; code: string }>;
 export interface AutomationDiscordGateway {
@@ -35,7 +37,7 @@ export function createAutomationDiscordGateway(client: Client): AutomationDiscor
       return {
         kind: 'READY',
         async send(message: string) {
-          const result = await channel.send({ content: message, allowedMentions: { parse: [] } });
+          const result = await channel.send({ content: message, allowedMentions: safeMentions });
           if (typeof result?.id !== 'string' || !validMessageId.test(result.id))
             throw new Error('Ambiguous Discord send result: missing valid message snowflake');
           return result.id;

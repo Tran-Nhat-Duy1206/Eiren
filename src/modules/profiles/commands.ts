@@ -1,4 +1,5 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import { boundedEmbed, presentationColor, discordTimestamp, safeMentions } from '../../core/presentation/index.js';
 import type { Command } from '../../core/commands/command.js';
 import { AppError } from '../../core/errors/errors.js';
 import type { Services } from '../../app/services.js';
@@ -15,7 +16,7 @@ export const profileCommands: Command[] = [{
     catch { throw new AppError('NOT_FOUND', 'Member is not in this server.'); }
     const profile = await services.profiles.get(interaction.guildId, user.id);
     const lines = [`**${member.displayName.replace(/[@*`_~|>]/g, '').slice(0, 80)}** · <@${user.id}>`,
-      `Joined: ${member.joinedAt ? `<t:${Math.floor(member.joinedAt.getTime() / 1000)}:D>` : 'Unknown'}`];
+      `Joined: ${member.joinedAt ? discordTimestamp(member.joinedAt) : 'Unknown'}`];
     if ('levels' in profile) {
       const level = profile.levels;
       lines.push(level ? `Level ${level.level} · ${level.xp} XP · ${level.nextLevelXp === null ? 'maximum safe XP level' : `${level.progress}/${level.nextLevelXp} toward next level`} · Rank ${level.rank ?? 'unranked'} · ${level.messageCount} XP-worthy messages`
@@ -23,6 +24,6 @@ export const profileCommands: Command[] = [{
     }
     if ('reputation' in profile) lines.push(`Reputation: ${profile.reputation ?? 0}`);
     if (!('levels' in profile) && !('reputation' in profile)) lines.push('Levels and reputation are disabled in this server.');
-    await interaction.editReply({ content: lines.join('\n'), allowedMentions: { parse: [] } });
+    await interaction.editReply({ embeds: [boundedEmbed({ title: 'Community profile', description: lines.join('\n'), color: presentationColor(!('levels' in profile) && !('reputation' in profile) ? 'DISABLED' : 'INFO') })], allowedMentions: safeMentions });
   },
 }];

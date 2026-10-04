@@ -36,7 +36,7 @@ describe('giveaways', () => {
     const row = { id: 19, guildId: 'g', channelId: 'c', messageId: 'm', creatorId: 'creator', prize: 'P'.repeat(256),
       endAt: new Date('2030-01-01'), status: 'ACTIVE', winnerCount: 3, requiredRoleId: 'required',
       minAccountAgeSeconds: 3600, minGuildAgeSeconds: 600, requireVerified: true, minLevel: 4 };
-    const sent: { content: string; components: { components: { data: { disabled?: boolean } }[] }[]; allowedMentions: { parse: string[] } }[] = [];
+    const sent: { content: string; components: { components: { data: { disabled?: boolean; custom_id?: string } }[] }[]; allowedMentions: { parse: string[] } }[] = [];
     const channel = { type: 0, send: vi.fn(async (payload: typeof sent[number]) => { sent.push(payload); return { id: 'new' }; }),
       messages: { edit: vi.fn(async (_id: string, payload: typeof sent[number]) => { sent.push(payload); }) } };
     const guild = { channels: { fetch: vi.fn(async () => channel) } };
@@ -48,8 +48,13 @@ describe('giveaways', () => {
     expect(sent[0]!.content.length).toBeLessThanOrEqual(2000);
     expect(sent[0]!.allowedMentions).toEqual({ parse: [] });
     expect(sent[0]!.components[0]!.components).toHaveLength(2);
+    expect(sent[0]!.components[0]!.components.map(component => component.data.custom_id)).toEqual(['giveaway:enter:19', 'giveaway:leave:19']);
+    expect(sent[0]!.content).toContain('<t:1893456000:R>');
     await gateway.refresh({ ...row, status: 'ENDED' } as never, 13);
     expect(sent[1]!.content).toContain('Entries: 13');
+    expect(sent[1]!.content).toContain('<t:1893456000:F>');
+    expect(sent[1]!.components[0]!.components.map(component => component.data.custom_id)).toEqual(['giveaway:enter:19', 'giveaway:leave:19']);
+    expect(channel.messages.edit).toHaveBeenCalledWith('m', expect.anything());
     expect(sent[1]!.components[0]!.components.every(component => component.data.disabled)).toBe(true);
     expect(() => giveawayContent({ ...row, prize: 'P'.repeat(2001) } as never, 0)).toThrow('limits');
   });

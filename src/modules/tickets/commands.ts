@@ -1,4 +1,5 @@
 import { AttachmentBuilder, MessageFlags, SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import { safeMentions } from '../../core/presentation/index.js';
 import { AppError } from '../../core/errors/errors.js';
 import type { Command } from '../../core/commands/command.js';
 import type { Actor } from '../../core/permissions/permission-service.js';
@@ -37,34 +38,34 @@ export const ticketCommand: Command = {
     const id = () => interaction.options.getInteger('id', true);
     if (sub === 'open') {
       const row = await tickets.open(actor, interaction.options.getString('type', true) as (typeof ticketTypes)[number]);
-      await interaction.editReply({ content: `Ticket #${row.id} opened: <#${row.channelId}>.` });
+      await interaction.editReply({ allowedMentions: safeMentions, content: `Ticket #${row.id} opened: <#${row.channelId}>.` });
     } else if (sub === 'close') {
       const row = await tickets.close(actor, id(), interaction.options.getString('reason') ?? undefined);
-      await interaction.editReply({ content: `Ticket #${row.id} is closed and archived.` });
+      await interaction.editReply({ allowedMentions: safeMentions, content: `Ticket #${row.id} is closed and archived.` });
     } else if (sub === 'add' || sub === 'remove') {
       const row = await tickets.participant(actor, id(), interaction.options.getUser('member', true).id, sub === 'add');
-      await interaction.editReply({ content: `Ticket #${row.id} participant ${sub === 'add' ? 'added' : 'removed'}.` });
+      await interaction.editReply({ allowedMentions: safeMentions, content: `Ticket #${row.id} participant ${sub === 'add' ? 'added' : 'removed'}.` });
     } else if (sub === 'claim') {
       const row = await tickets.claim(actor, id());
-      await interaction.editReply({ content: `Ticket #${row.id} claimed.` });
+      await interaction.editReply({ allowedMentions: safeMentions, content: `Ticket #${row.id} claimed.` });
     } else if (sub === 'transfer') {
       const row = await tickets.transfer(actor, id(), interaction.options.getUser('member', true).id);
-      await interaction.editReply({ content: `Ticket #${row.id} transferred.` });
+      await interaction.editReply({ allowedMentions: safeMentions, content: `Ticket #${row.id} transferred.` });
     } else if (sub === 'transcript') {
       const transcript = await tickets.transcript(actor, id());
       const chunks = transcriptChunks(transcript);
       for (const [index, chunk] of chunks.entries()) {
         const files = [new AttachmentBuilder(chunk, { name: `ticket-${id()}-transcript-${index + 1}-of-${chunks.length}.txt` })];
         const content = `Private ticket #${id()} transcript part ${index + 1} of ${chunks.length}.`;
-        if (index === 0) await interaction.editReply({ content, files });
-        else await interaction.followUp({ content, files, flags: MessageFlags.Ephemeral });
+        if (index === 0) await interaction.editReply({ allowedMentions: safeMentions, content, files });
+        else await interaction.followUp({ content, files, allowedMentions: safeMentions, flags: MessageFlags.Ephemeral });
       }
     } else if (sub === 'status') {
       const row = await tickets.status(actor, id());
-      await interaction.editReply({ content: `#${row.id} ${row.type} ${row.status}; creator: ${row.creatorId}; assigned: ${row.assignedStaffId ?? 'none'}; channel: ${row.channelId ? `<#${row.channelId}>` : 'pending'}.` });
+      await interaction.editReply({ allowedMentions: safeMentions, content: `#${row.id} ${row.type} ${row.status}; creator: ${row.creatorId}; assigned: ${row.assignedStaffId ?? 'none'}; channel: ${row.channelId ? `<#${row.channelId}>` : 'pending'}.` });
     } else if (sub === 'list') {
       const rows = await tickets.list(actor, interaction.options.getBoolean('all') ?? false);
-      await interaction.editReply({ content: rows.length ? rows.map((row: Ticket) => `#${row.id} ${row.type} ${row.status}`).join('\n') : 'No tickets found.' });
+      await interaction.editReply({ allowedMentions: safeMentions, content: rows.length ? rows.map((row: Ticket) => `#${row.id} ${row.type} ${row.status}`).join('\n') : 'No tickets found.' });
     } else if (sub === 'config') {
       const role = interaction.options.getRole('staff-role');
       const channel = interaction.options.getChannel('transcript-channel');
@@ -72,7 +73,7 @@ export const ticketCommand: Command = {
       const settings = role || channel || maximum !== null
         ? await tickets.configure(actor, { ...(role ? { staffRoleId: role.id } : {}), ...(channel ? { transcriptChannelId: channel.id } : {}), ...(maximum !== null ? { maxActiveTickets: maximum } : {}) })
         : (await tickets.settings(actor)).setting;
-      await interaction.editReply({ content: `Ticket staff role: ${settings?.staffRoleId ?? 'unset'}; max active: ${settings?.maxActiveTickets ?? 'unset'}; transcript channel: ${settings?.transcriptChannelId ?? 'unset'}. Configure ticket category with guild settings.` });
+      await interaction.editReply({ allowedMentions: safeMentions, content: `Ticket staff role: ${settings?.staffRoleId ?? 'unset'}; max active: ${settings?.maxActiveTickets ?? 'unset'}; transcript channel: ${settings?.transcriptChannelId ?? 'unset'}. Configure ticket category with guild settings.` });
     }
   },
 };

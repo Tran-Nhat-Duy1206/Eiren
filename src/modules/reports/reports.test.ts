@@ -41,7 +41,7 @@ describe('reports authorization and privacy', () => {
     const interaction = { guild: { id: actor.guildId, ownerId: actor.guildOwnerId, members: { fetch: async () => ({ roles: { cache: new Map() } }) } },
       user: { id: actor.userId }, options: { getSubcommand: () => 'submit', getString: (key: string) => key === 'category' ? 'Spam' : key === 'description' ? 'SECRET DESCRIPTION' : null, getUser: () => null }, editReply: vi.fn() };
     await reportCommands[0]!.execute(interaction as never, { reports: service } as never);
-    expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Private report #1 submitted for staff review.' });
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: 'Private report #1 submitted for staff review.', allowedMentions: { parse: [] } });
     expect(JSON.stringify(interaction.editReply.mock.calls)).not.toContain('SECRET');
   });
   it('audits only IDs and statuses, and tolerates notifier failures', async () => {

@@ -1,4 +1,5 @@
 import { ChannelType, SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import { safeMentions } from '../../core/presentation/index.js';
 import { AppError } from '../../core/errors/errors.js';
 import type { Actor } from '../../core/permissions/permission-service.js';
 import type { Command } from '../../core/commands/command.js';
@@ -25,7 +26,7 @@ export const tempvoiceCommand: Command = {
     const service = services.tempvoice;
     const result = sub === 'setup' ? await service.setup(actor, interaction.options.getChannel('lobby', true).id, interaction.options.getChannel('category', true).id, interaction.options.getInteger('limit') ?? 0, interaction.options.getBoolean('private') ?? true)
       : sub === 'disable' ? await service.disable(actor) : await service.settings(actor);
-    await interaction.editReply({ content: `Temporary voice: ${result?.enabled ? 'enabled' : 'disabled'}; lobby: ${result?.lobbyChannelId ?? 'unset'}; category: ${result?.categoryId ?? 'unset'}; limit: ${result?.userLimit ?? 0}; private: ${result?.defaultPrivate ?? true}.` });
+    await interaction.editReply({ allowedMentions: safeMentions, content: `Temporary voice: ${result?.enabled ? 'enabled' : 'disabled'}; lobby: ${result?.lobbyChannelId ?? 'unset'}; category: ${result?.categoryId ?? 'unset'}; limit: ${result?.userLimit ?? 0}; private: ${result?.defaultPrivate ?? true}.` });
   },
 };
 const voiceData = new SlashCommandBuilder().setName('voice').setDescription('Control your temporary voice room')
@@ -45,7 +46,7 @@ export const voiceCommand: Command = {
     const action = interaction.options.getSubcommand() as 'rename' | 'lock' | 'unlock' | 'limit' | 'kick' | 'allow' | 'deny' | 'transfer' | 'status';
     const value = action === 'rename' ? interaction.options.getString('name', true) : action === 'limit' ? interaction.options.getInteger('count', true) : ['kick', 'allow', 'deny', 'transfer'].includes(action) ? interaction.options.getUser('member', true).id : undefined;
     const room = await services.tempvoice.control(actor, channelId, action, value);
-    await interaction.editReply({ content: action === 'status' ? `Room <#${room.channelId}> is ${room.status}; owner: <@${room.ownerId}>.` : `Room <#${room.channelId}> ${action} completed.` });
+    await interaction.editReply({ allowedMentions: safeMentions, content: action === 'status' ? `Room <#${room.channelId}> is ${room.status}; owner: <@${room.ownerId}>.` : `Room <#${room.channelId}> ${action} completed.` });
   },
 };
 export const tempvoiceCommands = [tempvoiceCommand, voiceCommand];

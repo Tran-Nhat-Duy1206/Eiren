@@ -2,6 +2,7 @@ import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.j
 import type { Command } from '../../core/commands/command.js';
 import type { Actor, PermissionLevel } from '../../core/permissions/permission-service.js';
 import { AppError } from '../../core/errors/errors.js';
+import { boundedContent, safeMentions } from '../../core/presentation/index.js';
 import { configurableFields, type ConfigField } from '../../services/guild-config-service.js';
 
 function guildId(interaction: ChatInputCommandInteraction): string {
@@ -22,7 +23,7 @@ export const setupCommand: Command = {
   async execute(interaction, services) {
     const before = await services.guildConfig.get(guildId(interaction));
     const settings = await services.guildConfig.setup(guildId(interaction));
-    await interaction.editReply({ content: `${before ? 'Already initialized' : 'Setup complete'}. Language: ${settings.language}; timezone: ${settings.timezone}. Use /config to manage settings.` });
+    await interaction.editReply({ allowedMentions: safeMentions, content: `${before ? 'Already initialized' : 'Setup complete'}. Language: ${settings.language}; timezone: ${settings.timezone}. Use /config to manage settings.` });
   },
 };
 
@@ -49,25 +50,25 @@ export const configCommand: Command = {
       const settings = await services.guildConfig.get(id);
       if (!settings) throw new AppError('NOT_FOUND', 'Run /setup first.');
       const fields = Object.entries(configurableFields).map(([label, key]) => `${label}: ${settings[key] ?? 'not set'}`);
-      await interaction.editReply({ content: fields.join('\n') });
+      await interaction.editReply({ allowedMentions: safeMentions, content: boundedContent(fields.join('\n')) });
     } else if (action === 'set') {
       const field = interaction.options.getString('field', true) as ConfigField;
       const input = interaction.options.getString('value', true).trim();
       const value = input.toLowerCase() === 'clear' ? null : input;
       await services.guildConfig.update(id, field, value);
-      await interaction.editReply({ content: `Updated ${field}.` });
+      await interaction.editReply({ allowedMentions: safeMentions, content: `Updated ${field}.` });
     } else if (action === 'roles') {
       const mappings = await services.repository.getRoleMappings(id);
-      await interaction.editReply({ content: mappings.length ? mappings.map(mapping => `${mapping.roleId}: ${mapping.level}`).join('\n') : 'No role mappings configured.' });
+      await interaction.editReply({ allowedMentions: safeMentions, content: boundedContent(mappings.length ? mappings.map(mapping => `${mapping.roleId}: ${mapping.level}`).join('\n') : 'No role mappings configured.') });
     } else if (action === 'role-set') {
       const role = interaction.options.getRole('role', true);
       const level = interaction.options.getString('level', true) as PermissionLevel;
       await services.permissions.setRole(await actorFor(interaction), role.id, level, services.repository);
-      await interaction.editReply({ content: `Mapped ${role.name} to ${level}.` });
+      await interaction.editReply({ allowedMentions: safeMentions, content: `Mapped ${role.name} to ${level}.` });
     } else if (action === 'role-remove') {
       const role = interaction.options.getRole('role', true);
       await services.permissions.removeRole(await actorFor(interaction), role.id, services.repository);
-      await interaction.editReply({ content: `Removed mapping for ${role.name}.` });
+      await interaction.editReply({ allowedMentions: safeMentions, content: `Removed mapping for ${role.name}.` });
     }
   },
 };
@@ -86,12 +87,12 @@ export const moduleCommand: Command = {
     const action = interaction.options.getSubcommand();
     if (action === 'list') {
       const modules = await services.modules.list(id);
-      await interaction.editReply({ content: modules.length ? modules.map(module => `${module.key}: ${module.enabled ? 'enabled' : 'disabled'}`).join('\n') : 'No optional production modules are installed in V0.' });
+      await interaction.editReply({ allowedMentions: safeMentions, content: boundedContent(modules.length ? modules.map(module => `${module.key}: ${module.enabled ? 'enabled' : 'disabled'}`).join('\n') : 'No optional production modules are installed in V0.') });
       return;
     }
     const name = interaction.options.getString('name', true).trim();
     await services.modules.setEnabled(id, name, action === 'enable', interaction.user.id);
-    await interaction.editReply({ content: `${name} ${action === 'enable' ? 'enabled' : 'disabled'}.` });
+    await interaction.editReply({ allowedMentions: safeMentions, content: `${name} ${action === 'enable' ? 'enabled' : 'disabled'}.` });
   },
 };
 

@@ -100,7 +100,7 @@ describe('setup command', () => {
     settings!.timezone = 'Asia/Tokyo';
     await setupCommand.execute(interaction as never, { guildConfig } as unknown as Services);
     expect(await guildConfig.get()).toMatchObject({ timezone: 'Asia/Tokyo' });
-    expect(editReply).toHaveBeenLastCalledWith({ content: expect.stringContaining('Already initialized') });
+    expect(editReply).toHaveBeenLastCalledWith({ allowedMentions: { parse: [] }, content: expect.stringContaining('Already initialized') });
     expect(guildConfig.setup).toHaveBeenCalledTimes(2);
   });
 });

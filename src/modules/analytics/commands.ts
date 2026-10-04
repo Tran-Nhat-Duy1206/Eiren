@@ -1,4 +1,5 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import { boundedEmbed, presentationColor, safeMentions } from '../../core/presentation/index.js';
 import type { Command } from '../../core/commands/command.js';
 import { AppError } from '../../core/errors/errors.js';
 import type { Actor } from '../../core/permissions/permission-service.js';
@@ -28,18 +29,25 @@ export const analyticsCommands: Command[] = [{
     const sub = interaction.options.getSubcommand();
     if (sub === 'summary') {
       if (!(await services.analytics.status(actor)).enabled) {
-        await interaction.editReply({ content: 'Analytics is disabled. Historical aggregates may remain until retention cleanup.', allowedMentions: { parse: [] } });
+        await interaction.editReply({ content: 'Analytics is disabled. Historical aggregates may remain until retention cleanup.', allowedMentions: safeMentions });
         return;
       }
       const result = await services.analytics.summaryFor(actor, interaction.options.getString('range', true) as AnalyticsRange,
         interaction.options.getString('timezone') ?? 'UTC');
       const { messages, joins, leaves, net, voiceSeconds } = result.totals;
-      await interaction.editReply({ content: `Analytics ${result.range} (${result.timezone}): ${messages} messages, ${joins} joins, ${leaves} leaves (net ${net}), ${voiceSeconds}s voice.\nTop channels: ${result.channels.map(x => `${x.channelId}: ${x.messages}`).join(', ') || 'none'}\nTop commands: ${result.commands.map(x => `${x.commandName}: ${x.invocations}`).join(', ') || 'none'}\nBusiness: ${JSON.stringify(result.business)}`.slice(0, 1900), allowedMentions: { parse: [] } });
+      await interaction.editReply({ embeds: [boundedEmbed({ title: `Analytics · ${result.range}`, color: presentationColor('INFO'),
+        description: `Timezone label: ${result.timezone}\n${messages} messages · ${joins} joins · ${leaves} leaves (net ${net}) · ${voiceSeconds}s voice.`,
+        fields: [
+          { name: 'Top channels', value: result.channels.map(x => `${x.channelId}: ${x.messages}`).join(', ') || 'none' },
+          { name: 'Top commands', value: result.commands.map(x => `${x.commandName}: ${x.invocations}`).join(', ') || 'none' },
+          { name: 'Business', value: JSON.stringify(result.business) },
+        ],
+      })], allowedMentions: safeMentions });
       return;
     }
     const status = sub === 'enable' || sub === 'disable' ? await services.analytics.setEnabled(actor, sub === 'enable')
       : sub === 'config' ? await services.analytics.configure(actor, interaction.options.getInteger('retention_days', true))
         : await services.analytics.status(actor);
-    await interaction.editReply({ content: `Analytics ${status.enabled ? 'enabled' : 'disabled'}; retention ${status.retentionDays} days.`, allowedMentions: { parse: [] } });
+    await interaction.editReply({ content: `Analytics ${status.enabled ? 'enabled' : 'disabled'}; retention ${status.retentionDays} days.`, allowedMentions: safeMentions });
   },
 }];

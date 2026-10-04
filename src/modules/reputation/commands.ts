@@ -1,4 +1,5 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import { safeMentions } from '../../core/presentation/index.js';
 import type { Command } from '../../core/commands/command.js';
 import { AppError } from '../../core/errors/errors.js';
 import type { Actor } from '../../core/permissions/permission-service.js';
@@ -18,7 +19,7 @@ const rep: Command = {
     const actor = await actorFor(interaction);
     const target = interaction.options.getUser('member', true);
     const score = await services.reputation.grant(actor, target.id, interaction.user.bot, interaction.id);
-    await interaction.editReply({ content: `Reputation given to <@${target.id}>. Score: ${score}.`, allowedMentions: { parse: [] } });
+    await interaction.editReply({ content: `Reputation given to <@${target.id}>. Score: ${score}.`, allowedMentions: safeMentions });
   },
 };
 const reputation: Command = {
@@ -34,7 +35,7 @@ const reputation: Command = {
       ? await services.reputation.configure(actor, { globalCooldownSeconds: interaction.options.getInteger('global_seconds', true),
         sameTargetCooldownSeconds: interaction.options.getInteger('same_target_seconds', true) })
       : await services.reputation.settings(actor);
-    await interaction.editReply({ content: `Reputation cooldowns: global ${config.globalCooldownSeconds}s; same target ${config.sameTargetCooldownSeconds}s.`, allowedMentions: { parse: [] } });
+    await interaction.editReply({ content: `Reputation cooldowns: global ${config.globalCooldownSeconds}s; same target ${config.sameTargetCooldownSeconds}s.`, allowedMentions: safeMentions });
   },
 };
 export const reputationCommands: Command[] = [rep, reputation];

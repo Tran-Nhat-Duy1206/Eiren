@@ -88,7 +88,8 @@ describe('dashboard HTTP boundary', () => {
       expect(all.every(fn => fn.mock.calls.length === 0)).toBe(true);
       const result = await app.inject({ method: 'POST', url, headers: cookie, payload });
       expect(result.statusCode).toBe(303);
-      expect(result.headers.location).toBe(`/g/${guildId}/${c.page}`);
+      const keys: Record<string, string> = { 'moderation-warn':'warning-recorded', 'ticket-close':'ticket-closed', 'suggestion-status':'suggestion-updated', 'levels-config':'levels-updated', 'event-cancel':'event-cancelled', 'giveaway-end':'giveaway-ended', 'module-toggle':'module-updated', 'analytics-retention':'analytics-updated', 'role-set':'role-updated' };
+      expect(result.headers.location).toBe(`/g/${guildId}/${c.page}?notice=${keys[c.name]}`);
       expect(f.authorize).toHaveBeenCalledWith(guildId, expect.anything(), c.level);
       expect(f.mutations[c.key]).toHaveBeenCalledExactlyOnceWith(...c.args);
       expect(all.reduce((n, fn) => n + fn.mock.calls.length, 0)).toBe(1);

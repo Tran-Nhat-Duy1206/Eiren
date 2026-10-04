@@ -1,4 +1,5 @@
 import { ChannelType, DiscordAPIError, EmbedBuilder, PermissionFlagsBits, type Guild, type Message, type MessageReaction } from 'discord.js';
+import { boundedEmbed, presentationColor, safeMentions } from '../../core/presentation/index.js';
 import { AppError } from '../../core/errors/errors.js';
 
 export type StarSource = { guildId: string; channelId: string; messageId: string; authorId: string; createdAt: Date; content?: string; nsfw: boolean; public: boolean; bot?: boolean };
@@ -13,12 +14,12 @@ export interface StarboardGateway {
 }
 
 export function starboardPost(source: StarSource, count: number, emoji: string) {
-  const embed = new EmbedBuilder().setTitle(`${emoji} ${count} · #${source.channelId}`)
+  const embed = new EmbedBuilder().setColor(presentationColor('INFO')).setTitle(`${emoji} ${count} · #${source.channelId}`)
     .setDescription(`[Jump to message](https://discord.com/channels/${source.guildId}/${source.channelId}/${source.messageId})`)
     .addFields({ name: 'Author', value: `<@${source.authorId}>` }, { name: 'Channel', value: `<#${source.channelId}>` })
     .setTimestamp(source.createdAt);
   if (source.content) embed.addFields({ name: 'Message', value: source.content.slice(0, 1024) });
-  return { embeds: [embed], allowedMentions: { parse: [] as [] } };
+  return { embeds: [new EmbedBuilder(boundedEmbed(embed.toJSON()))], allowedMentions: safeMentions };
 }
 export class DiscordStarboardGateway implements StarboardGateway {
   constructor(private readonly guild: Guild) {}

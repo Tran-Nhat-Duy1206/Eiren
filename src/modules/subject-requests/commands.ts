@@ -1,4 +1,5 @@
 import { SlashCommandBuilder } from 'discord.js';
+import { safeMentions } from '../../core/presentation/index.js';
 import type { Command } from '../../core/commands/command.js';
 import { AppError } from '../../core/errors/errors.js';
 import { SCOPE_WARNING, WORKFLOW_EVIDENCE_WARNING, type SubjectRequestView } from './contracts.js';
@@ -34,7 +35,7 @@ export const privacyCommand: Command = {
       // DATABASE is the existing sanitized dispatcher boundary; never attach raw cause/SQL/text.
       throw new AppError('DATABASE', 'Privacy request service is temporarily unavailable.');
     }
-    await interaction.editReply({ content: ownRequestContent(request), allowedMentions: { parse: [] } });
+    await interaction.editReply({ content: ownRequestContent(request), allowedMentions: safeMentions });
   },
 };
 export const subjectRequestCommands: Command[] = [privacyCommand];

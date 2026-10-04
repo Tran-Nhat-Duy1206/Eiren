@@ -1,19 +1,23 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, PermissionFlagsBits, type Guild } from 'discord.js';
 import { AppError } from '../../core/errors/errors.js';
 import type { CommunityEvent } from './repository.js';
+import { boundedEmbed, discordTimestamp, presentationColor, safeMentions } from '../../core/presentation/index.js';
 
-export const eventTimestamp = (date: Date) => `<t:${Math.floor(date.getTime() / 1000)}:F>`;
+export const eventTimestamp = (date: Date) => discordTimestamp(date);
 export function eventPost(row: CommunityEvent, participants: number) {
-  const embed = new EmbedBuilder().setTitle(row.title.slice(0, 256)).setDescription((row.description || 'Community event').slice(0, 4096))
-    .addFields({ name: 'Event', value: `#${row.id} · ${row.status}` },
+  const embed = new EmbedBuilder(boundedEmbed({
+    title: row.title, description: row.description || 'Community event',
+    color: presentationColor(row.status === 'CANCELLED' ? 'DISABLED' : row.status === 'COMPLETED' ? 'SUCCESS' : 'INFO'),
+    fields: [{ name: 'Event', value: `#${row.id} · ${row.status}` },
       { name: 'Starts', value: eventTimestamp(row.startAt) },
       { name: 'Organizer', value: `<@${row.creatorId}>` },
-      { name: 'Attendees', value: `${participants}${row.maxParticipants ? ` / ${row.maxParticipants}` : ''}` });
-  if (row.endAt) embed.addFields({ name: 'Ends', value: eventTimestamp(row.endAt) });
+      { name: 'Attendees', value: `${participants}${row.maxParticipants ? ` / ${row.maxParticipants}` : ''}` },
+      ...(row.endAt ? [{ name: 'Ends', value: eventTimestamp(row.endAt) }] : [])],
+  }));
   const components = row.status === 'SCHEDULED' ? [new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`event:join:${row.id}`).setLabel('Join').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`event:leave:${row.id}`).setLabel('Leave').setStyle(ButtonStyle.Secondary))] : [];
-  return { embeds: [embed], components, allowedMentions: { parse: [] as [] } };
+  return { embeds: [embed], components, allowedMentions: safeMentions };
 }
 export interface EventGateway {
   validateChannel(channelId: string): Promise<void>;
@@ -44,6 +48,6 @@ export class DiscordEventGateway implements EventGateway {
   async remind(channelId: string, event: CommunityEvent, offsetSeconds: number) {
     const label = offsetSeconds === 86400 ? '24 hours' : offsetSeconds === 3600 ? '1 hour' : '10 minutes';
     return (await (await this.channel(channelId)).send({ content: `Event #${event.id} (${event.title.slice(0, 256)}) starts in ${label}: ${eventTimestamp(event.startAt)}`,
-      allowedMentions: { parse: [] } })).id;
+      allowedMentions: safeMentions })).id;
   }
 }

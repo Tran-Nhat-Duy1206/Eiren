@@ -3,7 +3,9 @@ import { AppError } from '../../core/errors/errors.js';
 import type { Giveaway } from './repository.js';
 import type { GiveawayGateway } from './service.js';
 
-const noMentions = { parse: [] as [] };
+import { discordTimestamp, safeMentions } from '../../core/presentation/index.js';
+
+const noMentions = safeMentions;
 function buttons(row: Giveaway) { return [new ActionRowBuilder<ButtonBuilder>().addComponents(
   new ButtonBuilder().setCustomId(`giveaway:enter:${row.id}`).setLabel('Enter').setStyle(ButtonStyle.Success).setDisabled(row.status !== 'ACTIVE'),
   new ButtonBuilder().setCustomId(`giveaway:leave:${row.id}`).setLabel('Leave').setStyle(ButtonStyle.Secondary).setDisabled(row.status !== 'ACTIVE'))]; }
@@ -14,7 +16,7 @@ export function giveawayContent(row: Giveaway, entries: number) {
     row.requireVerified ? 'Verified account' : null, row.minLevel ? `Level ${row.minLevel}+` : null]
     .filter(Boolean).join(' · ') || 'None';
   const content = `Giveaway #${row.id} — ${row.prize}\nCreated by: <@${row.creatorId}>\nStatus: ${row.status}` +
-    `\n${row.status === 'ACTIVE' ? `Ends: <t:${Math.floor(row.endAt.getTime() / 1000)}:R>` : `Ended: <t:${Math.floor(row.endAt.getTime() / 1000)}:f>`}` +
+    `\n${row.status === 'ACTIVE' ? `Ends: ${discordTimestamp(row.endAt, 'R')}` : `Ended: ${discordTimestamp(row.endAt)}`}` +
     `\nWinners: ${row.winnerCount}\nEntries: ${entries}\nEligibility: ${requirements}`;
   if (content.length > 2000) throw new AppError('VALIDATION', 'Giveaway announcement exceeds Discord message limits.');
   return content;

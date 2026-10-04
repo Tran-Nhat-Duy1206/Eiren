@@ -17,7 +17,11 @@ async function main(): Promise<void> {
     privacyPage: false, privacyOriginCsrf: false, privacyCsp: false,
     healthzLiveness: false, readyzReady: false, readyzDegraded: false, operationsAdminPage: false,
     operationsPrivateFree: false, operationsUncertainLink: false, operationsSinceRestart: false,
-    operationsMigration: false, operationsNoMutations: false };
+    operationsMigration: false, operationsNoMutations: false,
+    designTokens: false, groupedNavigation: false, currentNavigation: false, responsiveStructure: false,
+    canonicalBadges: false, accessibleLandmarks: false, formLabelsHelp: false, destructivePresentation: false,
+    noticeAllowlist: false, noticeUnknownIgnored: false, contextualEmpty: false, guildPickerEscaped: false,
+    retentionSafetyCopy: false, privacySafetyCopy: false, operationsNoActionControls: false, presentationNoJs: false };
   try {
     const connected = await pool.query('SELECT 1 AS ready');
     checks.database = connected.rows[0]?.ready === 1;
@@ -32,10 +36,11 @@ async function main(): Promise<void> {
     const deps = {
       readiness, operations: { inspect: async (guildId: string) => { if (guildId !== localGuild) return forbidden(); return operationsFixture(); } },
       client: { guilds: { fetch: async () => ({ id: localGuild, name: 'Local dashboard fixture' }) } },
-      services: { modules: { isEnabled: async () => false }, permissions: { resolve: async () => 'GUILD_OWNER' },
+      services: { modules: { isEnabled: async (_guild: string, module: string) => !['automation', 'analytics'].includes(module) }, permissions: { resolve: async () => 'GUILD_OWNER' },
         automation: { list: async () => [], listRecentExecutions: async () => [] } },
       access: { authorize: async (guildId: string) => { if (guildId !== localGuild) return forbidden();
-        return { guildId, userId: localGuild, guildOwnerId: localGuild, roleIds: [] }; }, listAccessible: forbidden }, read: {},
+        return { guildId, userId: localGuild, guildOwnerId: localGuild, roleIds: [] }; }, listAccessible: async () => [{ id: localGuild, name: '<img src=x> Synthetic server' }] },
+      read: { overview: async () => ({ settings: { timezone: 'UTC' }, modules: [{ moduleKey: 'core', enabled: true }], counts: { activeCases: 1, openReports: 2, openTickets: 3, pendingSuggestions: 4, scheduledEvents: 5, activeGiveaways: 6 } }), botSettings: async () => ({ modules: [{ moduleKey: 'core', enabled: true }] }), tickets: async () => [] },
       audit: { record: forbidden },
       retention: { status: async () => ({ policy: { enabled: false, ticketDays: 90, reportDays: 365, appealDays: 365,
         version: 0, confirmedBy: null, confirmedAt: null }, eligibleCounts: { ticket: 0, report: 0, appeal: 0 },
@@ -144,6 +149,28 @@ async function main(): Promise<void> {
     checks.operationsMigration = operationsHtml.includes('0020_subject_request_governance') && operationsHtml.includes('Observed migration count') && operationsHtml.includes('NOT_TRACKED');
     checks.operationsNoMutations = !operationsHtml.includes('/action/') && !operationsHtml.includes('<script') && (operationsResponse.headers.get('content-security-policy') ?? '').includes("script-src 'none'");
     checks.secretFree &&= forbiddenValues.every(value => !readyBody.includes(value) && !degradedBody.includes(value) && !operationsHtml.includes(value));
+    const fixtureHeaders = { cookie: `dashboard_session=${localSession}` };
+    const page = async (name: string): Promise<string> => { const response = await fetch(new URL(`/g/${localGuild}/${name}`, url), { signal: deadline, headers: fixtureHeaders }); if (response.status !== 200) throw new Error('Synthetic presentation page failed'); return response.text(); };
+    const overviewHtml = await page('overview'), settingsHtml = await page('settings'), ticketsHtml = await page('tickets');
+    const noticeHtml = await page('settings?notice=module-updated'), unknownHtml = await page('settings?notice=NOT_A_NOTICE_PRIVATE_SENTINEL');
+    const pickerResponse = await fetch(new URL('/guilds', url), { signal: deadline, headers: fixtureHeaders }); const pickerHtml = await pickerResponse.text();
+    checks.designTokens = ['bg','surface-raised','surface-muted','text-muted','border-strong','accent','focus','success','warning','danger','info','neutral','space-8'].every(token => css.body.includes(`--${token}:`));
+    checks.groupedNavigation = ['General','Moderation','Community','Automation','Governance','System'].every(group => overviewHtml.includes(`<h2>${group}</h2>`));
+    checks.currentNavigation = overviewHtml.includes(`href="/g/${localGuild}/overview" aria-current="page"`);
+    checks.responsiveStructure = ['@media(max-width:64rem)','@media(max-width:48rem)','@media(max-width:27rem)','overflow-x:auto','min-height:44px','.action-group'].every(rule => css.body.includes(rule));
+    checks.canonicalBadges = overviewHtml.includes('status-success') && overviewHtml.includes('>Enabled</span>') && operationsHtml.includes('>NOT_TRACKED</span>');
+    checks.accessibleLandmarks = [login.body,pickerHtml,overviewHtml,automationHtml,retentionHtml,privacyHtml,operationsHtml,settingsHtml].every(html => (html.match(/<main\b/g) ?? []).length === 1 && html.includes('href="#main"') && html.includes('id="main"'));
+    checks.formLabelsHelp = settingsHtml.includes('aria-describedby="field-module-toggle-module-help"') && settingsHtml.includes('id="field-module-toggle-module-help"') && settingsHtml.includes('<label>Module key');
+    checks.destructivePresentation = ticketsHtml.includes('destructive-warning') && ticketsHtml.includes('btn-danger') && ticketsHtml.includes('name="confirm" value="yes" required');
+    checks.noticeAllowlist = noticeHtml.includes('Module availability updated. Historical data is not deleted.') && noticeHtml.includes('role="status"');
+    checks.noticeUnknownIgnored = !unknownHtml.includes('NOT_A_NOTICE_PRIVATE_SENTINEL');
+    checks.contextualEmpty = ticketsHtml.includes('No tickets to display.') && automationHtml.includes('No automation rules yet.');
+    checks.guildPickerEscaped = pickerResponse.status === 200 && pickerHtml.includes('&lt;img src=x&gt;') && !pickerHtml.includes('<img');
+    checks.retentionSafetyCopy = /DB-only|database-only/i.test(retentionHtml) && /Discord copies/i.test(retentionHtml) && /screenshots/i.test(retentionHtml) && /backups/i.test(retentionHtml);
+    checks.privacySafetyCopy = /point-in-time/i.test(privacyHtml) && /external copies/i.test(privacyHtml) && /future activity/i.test(privacyHtml) && /accountability/i.test(privacyHtml);
+    const operationsMain = operationsHtml.match(/<main[^>]*>([\s\S]*?)<\/main>/)?.[1] ?? '';
+    checks.operationsNoActionControls = !/<form\b|<button\b|\/action\//i.test(operationsMain);
+    checks.presentationNoJs = [login.body,pickerHtml,overviewHtml,automationHtml,retentionHtml,privacyHtml,operationsHtml,settingsHtml].every(html => !/<script\b|\son(?:click|change)=|javascript:/i.test(html)) && !/url\(|@import/i.test(css.body);
     console.log(JSON.stringify({ url, checks, redirects: { rootStatus: root.response.status, rootLocation: root.response.headers.get('location'), guildsStatus: guilds.response.status, guildsLocation: guilds.response.headers.get('location') }, passed: Object.values(checks).every(Boolean) }));
     if (!Object.values(checks).every(Boolean)) process.exitCode = 1;
   } catch (error) {

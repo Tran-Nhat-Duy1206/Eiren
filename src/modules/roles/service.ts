@@ -1,5 +1,6 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits, StringSelectMenuBuilder, type Client, type Guild, type TextChannel } from 'discord.js';
 import { AppError } from '../../core/errors/errors.js';
+import { boundedContent, safeMentions } from '../../core/presentation/index.js';
 import type { GuildLogNotifier } from '../../services/log-notifier.js';
 import type { RoleMenu, RoleMenuOption, RoleMenuRepository, RoleMenuTransaction } from './repository.js';
 
@@ -36,7 +37,7 @@ export function panel(menu: RoleMenu, options: RoleMenuOption[]) {
       .setCustomId(`${SELECT_PREFIX}${menu.id}`).setPlaceholder('Choose your roles').setMinValues(0)
       .setMaxValues(menu.exclusive ? 1 : Math.min(menu.maxValues, options.length))
       .addOptions(options.map(option => ({ label: option.label, value: String(option.id), ...(option.description ? { description: option.description } : {}) }))))];
-  return { content: `**${menu.name}**\nChoose ${menu.exclusive ? 'at most one role' : `up to ${menu.maxValues} roles`}.`, components, allowedMentions: { parse: [] as [] } };
+  return { content: boundedContent(`**${menu.name}**\nChoose ${menu.exclusive ? 'at most one role' : `up to ${menu.maxValues} roles`}.`), components, allowedMentions: safeMentions };
 }
 
 export class RoleMenuService {

@@ -1,4 +1,5 @@
 import { ChannelType, DiscordAPIError, PermissionFlagsBits, type Guild, type TextChannel } from 'discord.js';
+import { safeMentions } from '../../core/presentation/index.js';
 import { AppError } from '../../core/errors/errors.js';
 
 export interface TicketGateway {
@@ -42,7 +43,7 @@ export class DiscordTicketGateway implements TicketGateway {
       ], reason: `Eiren ticket #${id}` });
     // Never use lockPermissions: inherited category overwrites could expose the ticket.
     try {
-      await channel.send({ content: `Ticket #${id} · ${type}\nOpened by <@${creatorId}>. Staff may use /ticket claim, /ticket add, /ticket remove, /ticket transfer and /ticket close. The creator may close their own ticket.`, allowedMentions: { parse: [] } });
+      await channel.send({ content: `Ticket #${id} · ${type}\nOpened by <@${creatorId}>. Staff may use /ticket claim, /ticket add, /ticket remove, /ticket transfer and /ticket close. The creator may close their own ticket.`, allowedMentions: safeMentions });
     } catch (error) {
       try { await channel.delete('Ticket header could not be created'); }
       catch { throw new AppError('CONFLICT', `Ticket #${id} header failed and channel ${channel.id} requires manual cleanup.`); }

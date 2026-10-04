@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Events, MessageFlags } from 'discord.js';
 import { AppError } from '../../core/errors/errors.js';
+import { presentationColor } from '../../core/presentation/index.js';
 import { PermissionService, type Actor } from '../../core/permissions/permission-service.js';
 import type { Logger } from '../../core/logger/logger.js';
 import type { Services } from '../../app/services.js';
@@ -139,6 +140,9 @@ describe('verification configuration', () => {
     expect((await repository.ensureSettings(guildId)).panelMessageId).toBe('panel-message-id');
     expect(gateway.sendPanel).toHaveBeenCalledWith(guildId, expect.anything());
     const panel = buildVerificationPanel({ mode: 'BUTTON', minAccountAgeSeconds: null, requireRulesAck: false });
+    expect(panel.embeds[0]!.toJSON()).toMatchObject({ title: 'Verification', color: presentationColor('INFO') });
+    expect(VERIFY_BUTTON_ID).toBe('eiren:v2:verify');
+    expect(RULES_ACK_BUTTON_ID).toBe('eiren:v2:ack');
     const ids = panel.components.flatMap(row => row.components.map(button => (button.toJSON() as { custom_id?: string }).custom_id));
     expect(ids).toEqual([VERIFY_BUTTON_ID]);
     const withAck = buildVerificationPanel({ mode: 'BUTTON', minAccountAgeSeconds: null, requireRulesAck: true });

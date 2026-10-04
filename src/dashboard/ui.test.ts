@@ -90,7 +90,7 @@ describe('dashboard server-rendered UI', () => {
   it('bounds output and supports mobile keyboard navigation', () => {
     expect(renderPage({ ...base, data: Array.from({ length: 100 }, (_, i) => ({ label: hostile.repeat(10), index: i })) }).length).toBeLessThan(200_000);
     const css = dashboardCss();
-    expect(css).toMatch(/@media\(max-width:700px\)/);
+    expect(css).toMatch(/@media\(max-width:48rem\)/);
     expect(css).toMatch(/overflow-x:auto/);
     expect(css).toMatch(/focus-visible/);
     expect(css).toContain('textarea:focus-visible');
@@ -162,7 +162,9 @@ describe('automation dashboard', () => {
     expect(html).toContain('name="module" value="automation"');
     expect(html).toContain('name="csrfToken" value="csrf"');
     expect(html).toContain('The bot cannot determine whether Discord accepted this message. It will not resend automatically.');
-    expect(html).not.toMatch(/Run now|Retry|Test send/i);
+    expect(html).not.toMatch(/<(?:button|a)\b[^>]*>[^<]*(?:Run now|Retry|Test send)/i);
+    expect(html).not.toMatch(/action="[^"]*(?:retry|run-now|test-send)/i);
+    expect(html).toContain('Do not blindly retry; inspect and reconcile.');
   });
   it('shows create inputs and gates navigation and content by ADMIN', () => {
     const create = renderAutomationDashboard({ guildId: '123', csrfToken: 'csrf', data: { ...data, selected: null, selectedExecution: null } });
