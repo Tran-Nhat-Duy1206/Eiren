@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createDashboardServer } from './web.js';
+import { brandMark } from './brand.js';
 import { AppError } from '../core/errors/errors.js';
 
 const guildId = '123456789012345678';
@@ -160,7 +161,8 @@ describe('dashboard HTTP boundary', () => {
       expect(result.statusCode).toBe(200);
       expect(result.headers['content-security-policy']).toContain("script-src 'none'");
       expect(result.body).toContain('&lt;svg onload=alert(1)&gt;');
-      expect(result.body).not.toMatch(/<svg|<script|<iframe|<img src=x/i);
+      expect(result.body.split(brandMark)).toHaveLength(2); // Only the exact static first-party mark is permitted.
+      expect(result.body.replaceAll(brandMark, '')).not.toMatch(/<svg|<script|<iframe|<img src=x/i);
       if (page === 'events') expect(result.body).toContain('&lt;img src=x onerror=alert(1)&gt;');
       if (page === 'giveaways') expect(result.body).toContain('&lt;script&gt;alert(2)&lt;/script&gt;');
     }

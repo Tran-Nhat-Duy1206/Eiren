@@ -52,6 +52,30 @@ describe('Discord presentation contract', () => {
       footer: { text: redactedText }, fields: [{ name: 'ID', value: '42', inline: true }] };
     expect(boundedEmbed(valid)).toEqual(valid);
   });
+  it('uses Eiren purple only for information while retaining functional semantic colors', () => {
+    const palette = {
+      INFO: 0x8b5cf6, SUCCESS: 0x398568, WARNING: 0xb58a42,
+      ERROR: 0xb85b5b, UNCERTAIN: 0xb58a42, DISABLED: 0x737b86,
+    } as const;
+    for (const kind of Object.keys(palette) as (keyof typeof palette)[]) {
+      expect(presentationColor(kind)).toBe(palette[kind]);
+      expect(statusEmbed(kind, 'Status', 'Details').color).toBe(palette[kind]);
+    }
+    expect(presentationColor('UNCERTAIN')).toBe(presentationColor('WARNING'));
+    for (const kind of ['SUCCESS', 'WARNING', 'ERROR', 'UNCERTAIN', 'DISABLED'] as const) {
+      expect(presentationColor(kind)).not.toBe(presentationColor('INFO'));
+    }
+  });
+  it('retains restrained readable status titles independently of brand color', () => {
+    const labels = {
+      SUCCESS: 'Success', INFO: 'Information', WARNING: 'Warning',
+      ERROR: 'Error', UNCERTAIN: 'Uncertain', DISABLED: 'Disabled',
+    } as const;
+    for (const kind of Object.keys(labels) as (keyof typeof labels)[]) {
+      expect(statusEmbed(kind, 'Delivery', 'Run ID: 42').title).toBe(`${labels[kind]} · Delivery`);
+    }
+    expect(boundedContent('Settings saved.')).toBe('Settings saved.');
+  });
   it('keeps all semantic kinds explicit and disabled distinct from error', () => {
     for (const kind of ['SUCCESS', 'INFO', 'WARNING', 'ERROR', 'UNCERTAIN', 'DISABLED'] as const) {
       expect(statusEmbed(kind, 'Status', 'Details').title).toBeTruthy();

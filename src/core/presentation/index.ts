@@ -2,7 +2,7 @@ import type { APIEmbed } from 'discord.js';
 
 export type PresentationKind = 'SUCCESS' | 'INFO' | 'WARNING' | 'ERROR' | 'UNCERTAIN' | 'DISABLED';
 const colors: Record<PresentationKind, number> = {
-  SUCCESS: 0x398568, INFO: 0x527da3, WARNING: 0xb58a42,
+  SUCCESS: 0x398568, INFO: 0x8b5cf6, WARNING: 0xb58a42,
   ERROR: 0xb85b5b, UNCERTAIN: 0xb58a42, DISABLED: 0x737b86,
 };
 export function presentationColor(kind: PresentationKind): number { return colors[kind]; }

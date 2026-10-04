@@ -2,6 +2,7 @@ import { ChannelType, PermissionFlagsBits } from 'discord.js';
 import { describe, expect, it, vi } from 'vitest';
 import { AppError } from '../core/errors/errors.js';
 import { createDashboardServer } from './web.js';
+import { brandMark } from './brand.js';
 
 const guildId = '123456789012345678';
 const foreignId = '999999999999999999';
@@ -65,7 +66,7 @@ describe('automation dashboard HTTP boundary', () => {
     await f.app.close();
   });
   it('updates selected guild-scoped rule exactly once', async () => { const f = await setup(); expect((await post(f.app, 'automation-update', { ...draft, automationId: '7' })).statusCode).toBe(303); expect(f.automation.inspect).toHaveBeenCalledExactlyOnceWith(actor, 7); expect(f.automation.update).toHaveBeenCalledExactlyOnceWith(actor, 7, expect.any(Object)); await f.app.close(); });
-  it('escapes hostile rule, message, guild and channel labels', async () => { const f = await setup(); f.guild.name = '<svg onload=alert(1)>'; f.channel.name = '<img src=x>'; f.automation.list.mockResolvedValueOnce([{ ...rule, name: '<script>alert(1)</script>' }]); f.automation.inspect.mockResolvedValueOnce({ ...rule, name: '<script>alert(1)</script>', actions: [{ ...rule.actions[0]!, config: { channelId, message: '<img src=x onerror=alert(2)>' } }] }); const page = await f.app.inject({ url: `/g/${guildId}/automations?automationId=7`, headers }); expect(page.statusCode).toBe(200); for (const text of ['&lt;svg', '&lt;script&gt;', '&lt;img']) expect(page.body).toContain(text); expect(page.body).not.toMatch(/<svg|<script|<img src=x/i); await f.app.close(); });
+  it('escapes hostile rule, message, guild and channel labels', async () => { const f = await setup(); f.guild.name = '<svg onload=alert(1)>'; f.channel.name = '<img src=x>'; f.automation.list.mockResolvedValueOnce([{ ...rule, name: '<script>alert(1)</script>' }]); f.automation.inspect.mockResolvedValueOnce({ ...rule, name: '<script>alert(1)</script>', actions: [{ ...rule.actions[0]!, config: { channelId, message: '<img src=x onerror=alert(2)>' } }] }); const page = await f.app.inject({ url: `/g/${guildId}/automations?automationId=7`, headers }); expect(page.statusCode).toBe(200); for (const text of ['&lt;svg', '&lt;script&gt;', '&lt;img']) expect(page.body).toContain(text); expect(page.body.split(brandMark)).toHaveLength(2); expect(page.body.replaceAll(brandMark, '')).not.toMatch(/<svg|<script|<img src=x/i); await f.app.close(); });
   it.each([['automation-enable', 'setEnabled', true], ['automation-disable', 'setEnabled', false], ['automation-delete', 'delete', null]] as const)('%s requires confirmation and calls service once', async (action, method, enabled) => { const f = await setup(); const payload = { csrfToken: 'csrf', automationId: '7' }; expect((await post(f.app, action, payload)).statusCode).toBe(403); expect((await post(f.app, action, { ...payload, confirm: 'yes' })).statusCode).toBe(303); if (method === 'setEnabled') expect(f.automation.setEnabled).toHaveBeenCalledExactlyOnceWith(actor, 7, enabled); else expect(f.automation.delete).toHaveBeenCalledExactlyOnceWith(actor, 7); await f.app.close(); });
   it('toggles only the Automation module after CSRF, Origin, ADMIN and confirmation', async () => {
     const f = await setup();

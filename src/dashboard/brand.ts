@@ -1,0 +1,5 @@
+/** Trusted decorative first-party geometry. Never accepts runtime data. */
+export const brandMark = `<svg class="brand-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" aria-hidden="true" focusable="false"><circle cx="24" cy="24" r="20" fill="#191526" stroke="#a78bfa" stroke-width="1.5"/><path d="M15 13h19v5H21v4h11v5H21v4h13v5H15Z" fill="#c4b5fd"/><path d="M5 29C12 39 37 31 43 17" fill="none" stroke="#8b5cf6" stroke-width="2"/><circle cx="41" cy="19" r="3" fill="#c4b5fd"/></svg>`;
+
+/** Selective empty-state orbit; no dynamic attributes, references or assets. */
+export const emptyArt = `<svg class="empty-art" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 112 64" aria-hidden="true" focusable="false"><ellipse cx="56" cy="32" rx="44" ry="20" fill="none" stroke="#514461"/><circle cx="56" cy="32" r="15" fill="#191526" stroke="#a78bfa"/><path d="M49 24h14M49 32h10M49 40h14M49 24v16" fill="none" stroke="#c4b5fd" stroke-width="3"/><circle cx="96" cy="24" r="3" fill="#8b5cf6"/></svg>`;
