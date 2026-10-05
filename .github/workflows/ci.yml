@@ -113,3 +113,9 @@ jobs:
           RESTORE_REHEARSAL_CONFIRM: isolated-synthetic-only
           RESTORE_PG17_CONTAINER: ${{ job.services.postgres.id }}
         run: pnpm db:restore-rehearsal
+      - name: V8.6 disposable guided recovery resurrection drill
+        env:
+          RECOVERY_DRILL_DATABASE_URL: postgresql://eiren:eiren_ci_only@127.0.0.1:5432/eiren
+          RECOVERY_DRILL_CONFIRM: isolated-synthetic-only
+          RECOVERY_PG17_CONTAINER: ${{ job.services.postgres.id }}
+        run: pnpm recovery:drill
