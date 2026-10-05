@@ -39,7 +39,7 @@ describe('dashboard server-rendered UI', () => {
   });
   it('links exactly to supported route keys and renders object read models', () => {
     for (const route of routes) {
-      const html = renderPage({ ...base, page: route, analyticsEnabled: true, data: { settings: { timezone: 'UTC', secretToken: 'PRIVATE' }, items: [{ label: 'Visible', transcript: 'PRIVATE', reportBody: 'PRIVATE' }] } });
+      const html = renderPage({ ...base, page: route, analyticsEnabled: true, data: route === 'analytics' ? { timezone: 'UTC', totals: { messages: 137, voiceSeconds: 180 }, currentMemberCount: 42, channels: [{ channelId: '123', messages: 137, voiceSeconds: 180 }] } : { settings: { timezone: 'UTC', secretToken: 'PRIVATE' }, items: [{ label: 'Visible', transcript: 'PRIVATE', reportBody: 'PRIVATE' }] } });
       expect(html).toContain(`href="/g/123/${route}" aria-current="page"`);
       expect(html).toContain('aria-label="Dashboard"');
       expect(html).not.toContain('PRIVATE');
