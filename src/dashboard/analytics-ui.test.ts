@@ -68,6 +68,36 @@ describe('dedicated analytics SSR', () => {
     const html = renderAnalyticsDashboard({ ...base, notice: hostile, data: { ...data, timezone: hostile, business: { tickets: new Error('SECRET') }, channels: [{ channelId: unknown, messages: hostile, voiceSeconds: new Error('SECRET') }], details: { moderation: { actions: new Error('SECRET') } } } });
     expect(html).toContain('&lt;script&gt;'); expect(html).not.toContain('<script>'); expect(html).not.toContain('SECRET'); expect(html).not.toContain('[object Object]');
   });
+  it('keeps the primary caption accessible while leaving aggregate captions visible', () => {
+    const html = renderAnalyticsDashboard({ ...base, data: { ...data, commands: [{ commandName: 'help', invocations: 1, errors: 0, totalDurationMs: 2 }] } });
+    const caption = 'Read-only summary: Channel activity (up to 10 records; UTC window)';
+    expect(html).toContain(`role="region" aria-label="${caption}" tabindex="0"><table><caption>${caption}</caption>`);
+    expect(html).toContain('<caption>Commands (up to 10)</caption>');
+    const added = dashboardCss().slice(dashboardTheme.length);
+    expect(added).toContain('.analytics-channel-card > .table-wrap caption{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);clip-path:inset(50%);white-space:nowrap;border:0}');
+    expect(added).not.toMatch(/caption\{[^}]*display:none|caption\{[^}]*visibility:hidden/);
+  });
+  it('scopes quiet polish and preserves natural six-row settings and shared focus', () => {
+    const added = dashboardCss().slice(dashboardTheme.length);
+    for (const rule of added.matchAll(/(?:^|[{}])\s*([^{}]+)\{/g)) {
+      const selector = rule[1]!.trim();
+      if (selector.startsWith('@media') || selector.startsWith('@supports')) continue;
+      for (const part of selector.split(',')) expect(part.trim()).toMatch(/^(?:\.analytics-|body:has\(\.analytics-page\))/);
+    }
+    expect(added).toContain('grid-template-rows:auto auto auto minmax(0,1fr) auto auto');
+    for (const [selector, row] of [['.analytics-settings-heading', 1], ['p', 2], ['label:not(.analytics-confirm)', 3], ['small', 4], ['.analytics-confirm', 5]] as const) expect(added).toContain(`.analytics-settings-card>${selector}{grid-row:${row}}`);
+    expect(added).toContain('.analytics-settings-card>button{grid-row:6;justify-self:start}');
+    expect(added).toContain('.analytics-settings-card>input[type=hidden]{display:none}');
+    expect(added).toContain('grid-template-rows:auto auto auto auto auto auto');
+    expect(added).toContain('@supports(grid-template-rows:subgrid){\n@media(min-width:769px){.analytics-settings-grid{grid-template-rows:repeat(6,auto);row-gap:10px}');
+    expect(added).toContain('.analytics-settings-card{grid-row:1 / span 6;grid-template-rows:subgrid}');
+    expect(added).toContain('min-height:136px');
+    expect(added).toContain('gap:6px;font-size:13px;color:var(--muted)');
+    expect(added).toContain('body:has(.analytics-page){background:radial-gradient(ellipse at 85% 0%,#7c3aed14');
+    expect(added).not.toMatch(/outline:|--focus:|animation:|filter:|glow-purple-strong|url\(/);
+    expect(dashboardTheme).toContain('outline:3px solid var(--focus)');
+    expect(dashboardTheme).toContain('@media(prefers-reduced-motion:reduce)');
+  });
   it('keeps old CSS byte-identical as a prefix and scopes responsive additions', () => {
     const css = dashboardCss(); expect(css.startsWith(dashboardTheme)).toBe(true);
     const added = css.slice(dashboardTheme.length);
